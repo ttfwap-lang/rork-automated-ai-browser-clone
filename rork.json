@@ -1,0 +1,13 @@
+{
+  "$schema": "https://rork.com/schema/rork.json",
+  "apps": [
+    {
+      "name": "Agent Browser",
+      "path": "ios-agent-browser",
+      "framework": "swift",
+      "settings": {
+        "displayName": "Automated AI Browser"
+      }
+    }
+  ]
+}
