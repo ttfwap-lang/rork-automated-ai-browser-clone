@@ -70,18 +70,7 @@ final class RoutineStore {
         guard let index = routines.firstIndex(where: { $0.id == id }),
               routines[index].moves.indices.contains(moveIndex)
         else { return }
-        let old = routines[index].moves[moveIndex]
-        routines[index].moves[moveIndex] = RecipeMove(
-            id: old.id,
-            action: old.action,
-            target: target,
-            expectedReaction: old.expectedReaction,
-            isCommitting: old.isCommitting,
-            valueKind: old.valueKind,
-            direction: old.direction,
-            amount: old.amount,
-            urlString: old.urlString
-        )
+        routines[index].moves[moveIndex] = routines[index].moves[moveIndex].retargeted(to: target)
         save()
     }
 

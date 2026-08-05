@@ -43,6 +43,8 @@ nonisolated struct AgentRun: Codable, Identifiable, Hashable {
     var repairCalls: Int? = nil
     /// How many cautions from this site's notebook were folded into the briefing.
     var cautionsUsed: Int? = nil
+    /// How many times you told the agent a move was a mistake.
+    var mistakesFlagged: Int? = nil
 
     var verdict: VerificationVerdict? {
         verdictRaw.flatMap { VerificationVerdict(rawValue: $0) }
@@ -89,6 +91,12 @@ nonisolated struct AgentRun: Codable, Identifiable, Hashable {
     var cautionLine: String? {
         guard let cautionsUsed, cautionsUsed > 0 else { return nil }
         return "\(cautionsUsed) caution\(cautionsUsed == 1 ? "" : "s") from earlier failures on this site"
+    }
+
+    /// "You flagged 1 mistake" — nil when you never stepped in.
+    var mistakeLine: String? {
+        guard let mistakesFlagged, mistakesFlagged > 0 else { return nil }
+        return "you flagged \(mistakesFlagged) mistake\(mistakesFlagged == 1 ? "" : "s")"
     }
 
     /// "3 moves replayed from memory" — nil when no memory was recalled.

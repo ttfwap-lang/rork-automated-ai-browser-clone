@@ -98,6 +98,48 @@ nonisolated struct RecipeMove: Codable, Hashable, Identifiable, Sendable {
         }
     }
 
+    /// The same move, pointing at where the control actually is now.
+    ///
+    /// Everything except the target is carried across untouched — including
+    /// `submits`. Losing that one flag would be the nastiest bug in the repair
+    /// path: the repaired step would find the search box, type into it, and
+    /// silently never press Enter, so the repair would look like a success while
+    /// the search never ran.
+    func retargeted(to target: ElementFingerprint) -> RecipeMove {
+        RecipeMove(
+            id: id,
+            action: action,
+            target: target,
+            expectedReaction: expectedReaction,
+            isCommitting: isCommitting,
+            valueKind: valueKind,
+            submits: submits,
+            direction: direction,
+            amount: amount,
+            urlString: urlString
+        )
+    }
+
+    /// True when a saved one-tap replay can actually PERFORM this move — either
+    /// unattended, or by stopping for a yes first.
+    ///
+    /// This is the rule for what may be written into a routine at all. Without
+    /// it a run could be saved as a replay that stops dead half way through with
+    /// “this step needs something a saved replay never stores”, which is a
+    /// promise broken at the worst possible moment. A move that cannot be
+    /// performed is refused at save time instead.
+    var isSavableInRoutine: Bool {
+        guard isCommitting else { return isReplayableInRoutine }
+        // Committing moves are allowed in a routine — they stop and ask you — but
+        // only the kinds a replay knows how to run at all.
+        switch kind {
+        case .tapElement, .typeInto, .selectOption:
+            return !(target?.name.trimmed.isEmpty ?? true)
+        default:
+            return false
+        }
+    }
+
     /// One line of the route in plain language, for the Memory screen.
     var plainLine: String {
         switch kind {

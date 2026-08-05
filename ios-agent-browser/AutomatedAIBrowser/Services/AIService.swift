@@ -44,6 +44,8 @@ nonisolated struct AIService {
         let memoryNote: String?
         /// What has gone wrong on this site before, folded in silently.
         let cautionNote: String?
+        /// The watching person's own objection to a move, in their words.
+        let mistakeNote: String?
         /// True when the agent may answer with a shortlist instead of one move.
         let allowShortlist: Bool
         /// True when there is at least one checkpoint to rewind to.
@@ -816,6 +818,12 @@ nonisolated struct AIService {
         var lines: [String] = []
         lines.append("GOAL: \(request.goal)")
         lines.append("")
+        // The watching person outranks everything else in this briefing, so their
+        // objection is the first thing read.
+        if let mistake = request.mistakeNote, !mistake.isEmpty {
+            lines.append(mistake)
+            lines.append("")
+        }
         if let objection = request.objection, !objection.isEmpty {
             lines.append("THE INDEPENDENT CHECK REJECTED YOUR LAST \"done\" CLAIM. Its objection, in its words:")
             lines.append("\"\(objection)\"")

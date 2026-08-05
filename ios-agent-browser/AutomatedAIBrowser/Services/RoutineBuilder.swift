@@ -12,6 +12,16 @@ nonisolated enum RoutineBuilder {
     /// A routine longer than this is a workflow, not a shortcut.
     static let maxMoves = 8
 
+    /// The part of a proven route a replay can actually perform, from the start.
+    ///
+    /// Truncates at the first move a replay could not run rather than saving it
+    /// and discovering it at replay time. A routine is a prefix of a run that
+    /// worked, so stopping early is honest — carrying on past a step that cannot
+    /// run would save a shortcut that breaks half way through.
+    static func savableRoute(from moves: [RecipeMove]) -> [RecipeMove] {
+        Array(moves.prefix { $0.isSavableInRoutine }.prefix(maxMoves))
+    }
+
     /// Builds the routine, or nil when there is nothing repeatable to save.
     ///
     /// - Parameters:
@@ -25,7 +35,7 @@ nonisolated enum RoutineBuilder {
         typedValues: [Int: String]
     ) -> Routine? {
         guard !host.isEmpty else { return nil }
-        let route = Array(moves.prefix(maxMoves))
+        let route = savableRoute(from: moves)
         guard !route.isEmpty else { return nil }
 
         let blanks = self.blanks(for: route)

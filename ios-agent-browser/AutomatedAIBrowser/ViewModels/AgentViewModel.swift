@@ -81,7 +81,8 @@ final class AgentViewModel {
     private var pendingRescueNote: String?
     private var didOfferRescue = false
     private var failedSignatures: Set<String> = []
-    private var lastResultLine: String?
+    /// What the page did last, shown live on the thinking panel.
+    private(set) var lastResultLine: String?
     private var lastTaskNumberForBookmark: Int?
     private var userRewindTarget: PageBookmark?
 
@@ -129,11 +130,35 @@ final class AgentViewModel {
     private var typedValues: [Int: String] = [:]
     /// The goal of the run that just finished, so it can be saved as a replay.
     private(set) var lastFinishedGoal: String?
+    /// How that run ended — the only evidence available when the independent
+    /// check is switched off.
+    private(set) var lastFinishedOutcome: RunOutcome?
+
+    /// Your objection to a move, written the way the agent has to read it. Kept
+    /// for the whole run so it can be re-handed rather than quietly forgotten.
+    private var mistakeRule: String?
+    /// The one-shot note for the next briefing.
+    private var pendingMistakeNote: String?
+    /// True while the agent owes you a rewritten route before it may act again.
+    private(set) var awaitingReplan = false
+    /// True when there was no plan rewrite left to demand, so your words stand as
+    /// a hard rule for every remaining step instead of being silently dropped.
+    private(set) var mistakeRuleOnly = false
+    /// How many times you stepped in.
+    private(set) var mistakeCount = 0
+    /// Moves you flagged. Barred for the rest of the run, by signature.
+    private var barredSignatures: Set<String> = []
+    /// One refusal per objection: a model that will not rewrite its route must
+    /// not be able to spin the run refusing forever.
+    private var replanRefusals = 0
+    /// Set when you flagged the very move the agent was waiting on approval for.
+    private var didFlagDuringApproval = false
 
     /// How many steps on the same task before the briefing suggests re-planning.
     private static let stuckNudgeThreshold = 4
     /// Rewinds allowed per mission.
     private static let maxRewinds = 3
+
 
     init(
         settings: AppSettings,
@@ -234,6 +259,15 @@ final class AgentViewModel {
         hitStepLimit = false
         lastFailReason = nil
         lastFinishedGoal = nil
+        lastFinishedOutcome = nil
+        mistakeRule = nil
+        pendingMistakeNote = nil
+        awaitingReplan = false
+        mistakeRuleOnly = false
+        mistakeCount = 0
+        barredSignatures = []
+        replanRefusals = 0
+        didFlagDuringApproval = false
         activeGoal = goal
         currentStepIndex = 0
         maxStepsThisRun = settings.maxSteps
@@ -322,6 +356,15 @@ final class AgentViewModel {
                 return
             }
 
+            // A rewind you asked for while flagging a mistake happens before
+            // anything else, so the agent rethinks from where you sent it rather
+            // than from where it went wrong.
+            if let target = userRewindTarget, !steps.isEmpty {
+                userRewindTarget = nil
+                phase = .acting
+                await rewind(to: target, reason: "you sent the agent back here after flagging a mistake", counted: false)
+            }
+
             phase = .observing
             await webProxy.waitForQuiet(maxWait: 8)
             guard !Task.isCancelled else {
@@ -344,6 +387,10 @@ final class AgentViewModel {
             // The check's objection is handed over exactly once.
             let objection = pendingObjection
             pendingObjection = nil
+            // Yours is handed over once as a demand to rewrite the route, and then
+            // every remaining step once it has become a standing rule.
+            let mistake = pendingMistakeNote ?? (mistakeRuleOnly ? mistakeRule : nil)
+            pendingMistakeNote = nil
             let deadEnds = pendingDeadEndNote
             pendingDeadEndNote = nil
             let rescue = pendingRescueNote
@@ -359,7 +406,7 @@ final class AgentViewModel {
                 lastResult: lastResultLine,
                 isRepeating: isRepeatingRecently(),
                 taskStuckCount: taskStuckCount,
-                hasObjection: objection != nil
+                hasObjection: objection != nil || mistake != nil
             ))
             let routingInputs = ModelRouter.Inputs(
                 strategy: settings.modelStrategy,
@@ -414,6 +461,7 @@ final class AgentViewModel {
                     rescueNote: rescue,
                     memoryNote: memoryNote,
                     cautionNote: cautionNote,
+                    mistakeNote: mistake,
                     allowShortlist: allowShortlist,
                     hasBookmarks: settings.bookmarksEnabled && !bookmarks.isEmpty && !checkpointsUnavailable,
                     modelID: route.choice.modelID
@@ -520,6 +568,16 @@ final class AgentViewModel {
                 break
             }
 
+            // Your objection outranks the model. A move you flagged never runs
+            // again, and while a rewrite is outstanding the page stays off limits
+            // until the route actually changes.
+            if let refusal = refusalReason(for: resolvedAction) {
+                steps[steps.count - 1].status = .rejected
+                steps[steps.count - 1].result = refusal
+                Haptics.warning()
+                continue
+            }
+
             if mode == .supervised {
                 phase = .awaitingApproval
                 Haptics.warning()
@@ -529,6 +587,12 @@ final class AgentViewModel {
                     return
                 }
                 if !approved {
+                    // Flagging already marked the move rejected and wrote your
+                    // entry into the log, so the run carries on from there.
+                    if didFlagDuringApproval {
+                        didFlagDuringApproval = false
+                        continue
+                    }
                     if let target = userRewindTarget {
                         userRewindTarget = nil
                         steps[steps.count - 1].status = .rejected
@@ -646,12 +710,20 @@ final class AgentViewModel {
         applyChecklist(from: action)
         steps[last].status = .executed
 
+        // The turn was spent on planning, which is exactly what a forced rewrite
+        // demanded — so the gate lifts here whatever the rewrite itself achieves.
+        // Leaving it up would let one uncooperative answer stall the whole run.
+        let wasForced = awaitingReplan
+        awaitingReplan = false
+
         guard var current = plan else {
             steps[last].result = "there is no mission plan to revise (planning is off) — carry on with the goal as written"
+            holdMistakeAsRule(wasForced)
             return
         }
         guard current.canRevise else {
             steps[last].result = "plan rewrite refused — this mission's \(MissionPlan.maxRevisions)-rewrite limit is used up; work the plan you have or report honestly"
+            holdMistakeAsRule(wasForced)
             return
         }
         let drafts = action.tasks ?? []
@@ -663,11 +735,19 @@ final class AgentViewModel {
         current.revise(with: drafts)
         plan = current
         planNote = nil
+        replanRefusals = 0
         taskStuckCount = 0
         lastCurrentTaskNumber = current.currentTask?.number
         let plural = drafts.count == 1 ? "" : "s"
         steps[last].result = "plan revised — \(drafts.count) task\(plural) ahead, \(current.doneCount) already done (rewrite \(current.revisions) of \(MissionPlan.maxRevisions))"
         Haptics.success()
+    }
+
+    /// When a rewrite you forced could not happen at all, your objection is kept
+    /// as a hard rule for every remaining step rather than quietly dropped.
+    private func holdMistakeAsRule(_ wasForced: Bool) {
+        guard wasForced, mistakeRule != nil else { return }
+        mistakeRuleOnly = true
     }
 
     /// Gentle, free nudge when the same task has been current for a while.
@@ -1179,6 +1259,15 @@ final class AgentViewModel {
         return (host, drafts)
     }
 
+    /// Shortens this run's cautions, one at a time, on this iPhone. Runs after the
+    /// run has already finished and been saved, so it can never delay a result or
+    /// break one — the mechanical wording is already safely written down.
+    private func polishCautions(_ drafts: [LessonDistiller.Draft], host: String) async {
+        for draft in drafts {
+            await polishCaution(draft, host: host)
+        }
+    }
+
     /// Asks this iPhone to shorten one caution into something a person would say.
     /// Free, optional, and discarded unless it still means the same thing.
     private func polishCaution(_ draft: LessonDistiller.Draft, host: String) async {
@@ -1206,17 +1295,27 @@ final class AgentViewModel {
         startRun()
     }
 
-    /// True when the run that just finished is worth offering to save: it was
-    /// confirmed, it happened somewhere real, it has moves worth repeating, and it
-    /// is not something you already saved.
+    /// True when the run that just finished is worth offering to save: it can be
+    /// trusted, it happened somewhere real, it has moves a replay can actually
+    /// perform, and it is not something you already saved.
     var canSaveRoutine: Bool {
-        guard !isRunning, activeRoutine == nil, finalVerdict == .confirmed else { return false }
+        guard !isRunning, activeRoutine == nil, wasLastRunTrustworthy else { return false }
         guard lastFinishedGoal != nil else { return false }
         let host = RecipeMatcher.normalizedHost(webProxy.webView.url?.absoluteString ?? "")
         guard !host.isEmpty else { return false }
-        let route = RecipeDistiller.route(from: executedMoves)
+        let route = RoutineBuilder.savableRoute(from: RecipeDistiller.route(from: executedMoves))
         guard !route.isEmpty else { return false }
         return !routines.contains(host: host, moves: route)
+    }
+
+    /// Whether the last run earned the right to become a saved replay.
+    ///
+    /// Normally the independent check has to have confirmed it. With the check
+    /// switched off there is no verdict to wait for, so a completed run stands on
+    /// its own — otherwise turning the check off would quietly switch saving off
+    /// with it, which is not a trade-off anyone asked for.
+    private var wasLastRunTrustworthy: Bool {
+        settings.verifyBeforeDone ? finalVerdict == .confirmed : lastFinishedOutcome == .completed
     }
 
     /// A name to offer for the replay, derived from the goal rather than invented.
@@ -1559,6 +1658,164 @@ final class AgentViewModel {
         return await handleClaimedDone(action, goal: goal)
     }
 
+    // MARK: - Your own objection
+
+    /// True while flagging a mistake would mean anything: a run in flight with at
+    /// least one move to object to.
+    var canFlagMistake: Bool {
+        isRunning && steps.contains { $0.action.kind.isPageAction }
+    }
+
+    /// The move your objection would be about, in plain words — shown on the
+    /// sheet so you can see exactly what you are rejecting.
+    var flaggableMoveText: String? {
+        flaggableStep.map { $0.action.plainSentence }
+    }
+
+    /// While the agent is waiting on you, the move in question is the one on the
+    /// table. Otherwise it is the last one that actually touched the page.
+    private var flaggableStep: AgentStep? {
+        if phase == .awaitingApproval { return steps.last }
+        return steps.last { $0.action.kind.isPageAction }
+    }
+
+    /// Checkpoints you could be sent back to along with the objection.
+    var rewindableBookmarks: [PageBookmark] {
+        guard settings.bookmarksEnabled, !checkpointsUnavailable else { return [] }
+        return bookmarks.reversed()
+    }
+
+    /// What your objection is doing right now, in plain words. nil when you have
+    /// not stepped in this run.
+    var mistakeStatus: String? {
+        guard mistakeCount > 0 else { return nil }
+        if awaitingReplan { return "rewriting its route — no extra call" }
+        if mistakeRuleOnly { return "no rewrite left — held as a hard rule" }
+        return "route rewritten after your flag"
+    }
+
+    /// You saw the agent go wrong. This is the one control in the app that
+    /// outranks the agent's own judgement.
+    ///
+    /// It costs nothing extra. The rewrite it forces rides along with the next
+    /// step's thinking, exactly as the agent's own re-planning does, and it never
+    /// touches the mission's rewind allowance — spending the agent's own budget on
+    /// your correction would punish you for helping.
+    ///
+    /// - Parameters:
+    ///   - note: what was wrong, in your words. Optional — flagging with nothing
+    ///     to say is still worth more than saying nothing at all.
+    ///   - bookmark: a checkpoint to be sent back to as well, when one helps.
+    func flagMistake(note: String, rewindTo bookmark: PageBookmark? = nil) {
+        guard isRunning else { return }
+        let clean = String(note.trimmed.prefix(MistakeBriefing.maxNoteLength))
+        let flagged = flaggableStep
+        let wasWaiting = phase == .awaitingApproval
+
+        mistakeCount += 1
+        replanRefusals = 0
+        // Your correction always goes to the strongest model. This is the moment
+        // the run can least afford a cheap guess.
+        mustEscalate = true
+
+        // Barred by signature, so the exact move cannot come back around — not
+        // discouraged in a prompt, refused in code.
+        if let flagged {
+            let signature = flagged.action.repetitionSignature
+            barredSignatures.insert(signature)
+            failedSignatures.insert(signature)
+            noteTried("you flagged this as a mistake: \(flagged.action.plainSentence)")
+        }
+
+        // The checklist stops claiming work you have just rejected.
+        plan?.untickLatest()
+
+        // A rewrite is only demanded when there is a plan with a rewrite left in
+        // it. When there is not, your objection becomes a standing rule rather
+        // than being quietly dropped.
+        let canRewrite = plan?.canRevise ?? false
+        awaitingReplan = canRewrite
+        mistakeRuleOnly = !canRewrite
+        mistakeRule = MistakeBriefing.standingRule(move: flagged?.action.plainSentence, note: clean)
+        pendingMistakeNote = canRewrite
+            ? MistakeBriefing.rewriteDemand(rule: mistakeRule ?? "")
+            : mistakeRule
+
+        // The move on the table never runs — marked before your entry is added so
+        // the log reads in the order it happened.
+        if wasWaiting, let last = steps.indices.last {
+            steps[last].status = .rejected
+            steps[last].result = "you flagged this as a mistake, so it never ran"
+        }
+
+        appendMistakeStep(flagged: flagged, note: clean, canRewrite: canRewrite, bookmark: bookmark)
+
+        if let bookmark { userRewindTarget = bookmark }
+        Haptics.warning()
+
+        if wasWaiting {
+            didFlagDuringApproval = true
+            resumeApproval(false)
+        }
+    }
+
+    /// Your objection, in the log, as your own entry. Marked as yours so the
+    /// record shows who changed course and why.
+    private func appendMistakeStep(
+        flagged: AgentStep?,
+        note: String,
+        canRewrite: Bool,
+        bookmark: PageBookmark?
+    ) {
+        var action = AgentAction(type: AgentActionKind.mistake.rawValue)
+        action.summary = note.isEmpty ? "you flagged the last move as a mistake" : note
+
+        var step = AgentStep(
+            index: currentStepIndex,
+            action: action,
+            reasoning: flagged.map { "you rejected: \($0.action.plainSentence)" }
+                ?? "you rejected the route the agent was taking",
+            result: nil,
+            status: .terminal,
+            snapshot: nil,
+            pageMap: nil
+        )
+
+        var parts: [String] = [
+            canRewrite
+                ? "the agent has to rewrite its route before it can touch the page again — no extra call, the rewrite uses the next step's thinking"
+                : "there is no plan rewrite left in this mission, so your objection is held as a hard rule for every remaining step",
+        ]
+        if flagged != nil { parts.append("that move is barred for the rest of the run") }
+        if let bookmark { parts.append("going back to checkpoint \(bookmark.number)") }
+        step.result = parts.joined(separator: " · ")
+
+        steps.append(step)
+        trimStoredImages()
+    }
+
+    /// Why this move may not run, when your objection bars it. nil means run it.
+    private func refusalReason(for action: AgentAction) -> String? {
+        if barredSignatures.contains(action.repetitionSignature) {
+            return MistakeBriefing.barredLine
+        }
+        guard awaitingReplan, action.kind.isPageAction else { return nil }
+
+        if replanRefusals >= MistakeBriefing.maxRefusals {
+            // A model that will not rewrite its route must not be able to spin the
+            // run being refused. Your objection stops being a gate and becomes a
+            // standing rule — which the panel says out loud.
+            awaitingReplan = false
+            mistakeRuleOnly = true
+            pendingMistakeNote = mistakeRule
+            return nil
+        }
+
+        replanRefusals += 1
+        pendingMistakeNote = MistakeBriefing.refusalDemand(rule: mistakeRule ?? "")
+        return MistakeBriefing.rewriteFirstLine
+    }
+
     // MARK: - Memory ceiling
 
     /// How many recent steps keep their screenshots at full resolution.
@@ -1651,6 +1908,50 @@ final class AgentViewModel {
     /// Saved steps this run had to repair to keep a replay working.
     var healTally: String? {
         healedMoveCount > 0 ? "\(healedMoveCount) HEALED" : nil
+    }
+
+    /// Cautions from earlier failures on this site that are in play right now.
+    var cautionTally: String? {
+        cautionsUsedCount > 0 ? "\(cautionsUsedCount) CAUTION\(cautionsUsedCount == 1 ? "" : "S")" : nil
+    }
+
+    // MARK: - The live thinking panel
+
+    /// The step the panel is currently narrating: the newest one that is not one
+    /// of the app's own bookkeeping entries.
+    private var narratedStep: AgentStep? {
+        steps.last { !$0.isCheckEntry && !$0.isHeadStartEntry && !$0.isReplayEntry }
+    }
+
+    /// The agent's own words for the move it is making. Never synthesised — when
+    /// the agent said nothing, the panel shows nothing rather than inventing an
+    /// inner monologue for it.
+    var liveThought: String? {
+        guard let step = narratedStep else { return nil }
+        let text = step.reasoning.trimmed
+        return text.isEmpty ? nil : text
+    }
+
+    /// That move in plain words — "tap the button “Apply filter”".
+    var liveMove: String? {
+        narratedStep.map { $0.action.plainSentence }
+    }
+
+    /// Whether the newest narrated entry is your own objection rather than a move.
+    var liveMoveIsYours: Bool {
+        narratedStep?.isMistakeEntry ?? false
+    }
+
+    /// True when the move being narrated repaired itself because the site had
+    /// moved the control. Shown so a healed step never passes for a clean one.
+    var liveMoveWasHealed: Bool {
+        narratedStep?.wasHealed ?? false
+    }
+
+    /// What the page actually did, for the panel's honest result line.
+    var liveResult: String? {
+        guard let result = narratedStep?.result?.trimmed, !result.isEmpty else { return nil }
+        return result
     }
 
     /// The saved replay this run is working through, when it is working through one.
@@ -1828,7 +2129,14 @@ final class AgentViewModel {
         lastResultLine = nil
         mustEscalate = true
         steps[last].destinationSnapshot = await webProxy.snapshot()
-        steps[last].result = counted ? "\(note) (rewind \(rewindCount) of \(Self.maxRewinds))" : note
+        // Appended rather than replaced: the entry may already say something the
+        // user needs — why they sent it back, what got barred.
+        let landed = counted ? "\(note) (rewind \(rewindCount) of \(Self.maxRewinds))" : note
+        if let existing = steps[last].result, !existing.isEmpty {
+            steps[last].result = "\(existing) · \(landed)"
+        } else {
+            steps[last].result = landed
+        }
 
         let tried = bookmark.tried.isEmpty
             ? "Nothing has been tried from here yet."
@@ -2092,7 +2400,7 @@ final class AgentViewModel {
         case .wait:
             try? await Task.sleep(for: .seconds(2))
             return ("waited 2s", nil)
-        case .revisePlan, .rewind, .done, .fail, .verify, .headStart, .replay, .unknown:
+        case .revisePlan, .rewind, .done, .fail, .verify, .headStart, .replay, .mistake, .unknown:
             return ("no-op", nil)
         }
     }
@@ -2101,6 +2409,17 @@ final class AgentViewModel {
         phase = .idle
         onDevice.coolDown()
         resumeApproval(false)
+
+        // Both of these are mechanical and free, so they happen on every finished
+        // run rather than only the good ones — a run that went wrong is the one
+        // with the most to teach.
+        let learned = recordLessons(outcome: outcome)
+        recordRoutineAttempt(outcome: outcome)
+
+        // Held so the banner can offer to save this run as a one-tap replay.
+        lastFinishedGoal = goal
+        lastFinishedOutcome = outcome
+
         persistRun(outcome: outcome, message: message, goal: goal)
         outcomeBanner = OutcomeBanner(outcome: outcome, message: message)
         activeGoal = nil
@@ -2111,6 +2430,24 @@ final class AgentViewModel {
         case .failed: Haptics.error()
         case .stopped: Haptics.warning()
         }
+
+        // The one optional flourish, off the critical path: ask this iPhone to
+        // shorten the cautions into something a person would say. Free, and the
+        // mechanical wording stands if it declines.
+        if let learned, isFreeTierReady {
+            Task { [weak self] in
+                await self?.polishCautions(learned.drafts, host: learned.host)
+            }
+        }
+    }
+
+    /// Writes the attempt back onto the saved replay it came from: how many times
+    /// it has run, how many steps it had to repair, and how it ended. Without this
+    /// a routine's own record stays frozen at zero and the honest "last time this
+    /// didn't work" warning on its chip can never appear.
+    private func recordRoutineAttempt(outcome: RunOutcome) {
+        guard let routine = activeRoutine else { return }
+        routines.recordRun(routine.id, outcome: outcome, healed: healedMoveCount)
     }
 
     // MARK: - Approval plumbing
@@ -2170,7 +2507,8 @@ final class AgentViewModel {
                 modelRaw: step.modelChoice?.rawValue,
                 difficultyRaw: step.difficulty?.rawValue,
                 weighedCount: step.candidates.isEmpty ? nil : step.candidates.count,
-                wasReplayed: step.isReplayed ? true : nil
+                wasReplayed: step.isReplayed ? true : nil,
+                wasHealed: step.wasHealed ? true : nil
             )
         }
         history.add(AgentRun(
@@ -2192,7 +2530,12 @@ final class AgentViewModel {
             freeSteps: freeCallCount,
             memoryUsed: recalledMatch?.recipe.title,
             replayedMoves: replayedMoveCount,
-            headStartHeld: headStartHeld
+            headStartHeld: headStartHeld,
+            routineTitle: activeRoutine?.title,
+            healedMoves: healedMoveCount > 0 ? healedMoveCount : nil,
+            repairCalls: repairCallCount > 0 ? repairCallCount : nil,
+            cautionsUsed: cautionsUsedCount > 0 ? cautionsUsedCount : nil,
+            mistakesFlagged: mistakeCount > 0 ? mistakeCount : nil
         ))
     }
 

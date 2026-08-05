@@ -108,6 +108,9 @@ struct RunDetailView: View {
         if let cautions = run.cautionLine {
             lines.append(cautions.uppercased())
         }
+        if let mistakes = run.mistakeLine {
+            lines.append(mistakes.uppercased())
+        }
         return lines
     }
 

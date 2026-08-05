@@ -58,13 +58,17 @@ struct AgentStep: Identifiable {
     /// True for the app's own one-tap replay summary entry.
     var isReplayEntry: Bool { action.kind == .replay }
 
-    /// What the log shows in the number slot. Neither the independent check nor
-    /// the head-start summary is a step you paid a decision for, so each gets its
-    /// own marker instead of borrowing a step number.
+    /// True for your own entry: the move you told the agent was a mistake.
+    var isMistakeEntry: Bool { action.kind == .mistake }
+
+    /// What the log shows in the number slot. None of the check, the head start,
+    /// the replay summary or your own objection is a step you paid a decision for,
+    /// so each gets its own marker instead of borrowing a step number.
     var displayNumber: String {
         if isCheckEntry { return "✓" }
         if isHeadStartEntry { return "»" }
         if isReplayEntry { return "▸" }
+        if isMistakeEntry { return "!" }
         return String(format: "%02d", index)
     }
 

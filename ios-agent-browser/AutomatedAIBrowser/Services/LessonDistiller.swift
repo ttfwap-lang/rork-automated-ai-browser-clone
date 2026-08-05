@@ -121,13 +121,6 @@ nonisolated enum LessonDistiller {
         return Array(unique.prefix(maxDrafts))
     }
 
-    /// The kinds of failure this run actually showed. Used to age out cautions
-    /// that no longer match the site: a lesson is only doubted when the run
-    /// worked the site and found no sign of it.
-    static func observedKinds(_ evidence: Evidence) -> Set<LessonKind> {
-        Set(read(evidence).map { $0.kind })
-    }
-
     static func make(_ kind: LessonKind, subject: String?) -> Draft {
         let clean = (subject ?? "").trimmed
         let named = clean.isEmpty ? nil : String(clean.prefix(48))

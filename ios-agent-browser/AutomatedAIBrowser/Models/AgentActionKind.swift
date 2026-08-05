@@ -1,7 +1,7 @@
 import Foundation
 
 /// The set of moves the AI agent can make inside the browser.
-nonisolated enum AgentActionKind: String, Codable {
+nonisolated enum AgentActionKind: String, Codable, CaseIterable {
     case tapElement = "tap_element"
     case typeInto = "type_into"
     case fillForm = "fill_form"
@@ -31,6 +31,10 @@ nonisolated enum AgentActionKind: String, Codable {
     case headStart = "head_start"
     /// The app's own entry for a saved one-tap replay. Never callable by the model.
     case replay
+    /// Your own entry: you told the agent the last move was a mistake. Never
+    /// callable by the model — the agent cannot flag its own move as your
+    /// objection.
+    case mistake = "user_mistake"
     case unknown
 
     var label: String {
@@ -60,6 +64,7 @@ nonisolated enum AgentActionKind: String, Codable {
         case .verify: "CHECK"
         case .headStart: "HEAD START"
         case .replay: "ONE-TAP REPLAY"
+        case .mistake: "YOU FLAGGED A MISTAKE"
         case .unknown: "UNKNOWN"
         }
     }
@@ -91,6 +96,7 @@ nonisolated enum AgentActionKind: String, Codable {
         case .verify: "checkmark.shield.fill"
         case .headStart: "bolt.horizontal.fill"
         case .replay: "bolt.badge.clock.fill"
+        case .mistake: "hand.raised.slash.fill"
         case .unknown: "questionmark.circle"
         }
     }
@@ -99,7 +105,7 @@ nonisolated enum AgentActionKind: String, Codable {
     /// one of these must never be accepted as a move.
     var isModelCallable: Bool {
         switch self {
-        case .verify, .headStart, .replay, .unknown: false
+        case .verify, .headStart, .replay, .mistake, .unknown: false
         default: true
         }
     }
@@ -107,7 +113,7 @@ nonisolated enum AgentActionKind: String, Codable {
     /// Moves that change the plan or end the run rather than touching the page.
     var isPageAction: Bool {
         switch self {
-        case .revisePlan, .rewind, .done, .fail, .verify, .headStart, .replay, .unknown: false
+        case .revisePlan, .rewind, .done, .fail, .verify, .headStart, .replay, .mistake, .unknown: false
         default: true
         }
     }

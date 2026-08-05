@@ -52,6 +52,7 @@ nonisolated struct PersistedStep: Codable, Identifiable, Hashable {
     var displayNumber: String {
         if kind == .headStart { return "»" }
         if kind == .replay { return "▸" }
+        if kind == .mistake { return "!" }
         if kind == .verify || index == 0 { return "✓" }
         return String(format: "%02d", index)
     }

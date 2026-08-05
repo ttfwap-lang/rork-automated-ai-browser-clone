@@ -6,6 +6,8 @@ struct PersistedStepCard: View {
     let step: PersistedStep
 
     private var statusColor: Color {
+        // Your own objection reads as yours at a glance, whatever its status.
+        if step.kind == .mistake { return Theme.red }
         if let verdict = step.verdict { return verdict.color }
         switch step.status {
         case .proposed: return Theme.amber
@@ -20,6 +22,7 @@ struct PersistedStepCard: View {
 
     private var numberColor: Color {
         if step.kind == .verify { return Theme.violet }
+        if step.kind == .mistake { return Theme.red }
         if step.kind == .headStart || step.kind == .replay { return Theme.amber }
         return Theme.textSecondary
     }

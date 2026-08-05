@@ -8,6 +8,8 @@ struct StepCardView: View {
     @State private var isShowingCandidates = false
 
     private var statusColor: Color {
+        // Your own objection reads as yours at a glance, whatever its status.
+        if step.isMistakeEntry { return Theme.red }
         if let verdict = step.verification?.verdict { return verdict.color }
         switch step.status {
         case .proposed: return Theme.amber
@@ -21,6 +23,7 @@ struct StepCardView: View {
     }
 
     private var borderColor: Color {
+        if step.isMistakeEntry { return Theme.red.opacity(0.4) }
         if let verdict = step.verification?.verdict { return verdict.color.opacity(0.35) }
         if step.status == .proposed { return Theme.amber.opacity(0.3) }
         if step.isHeadStartEntry || step.isReplayEntry { return Theme.amber.opacity(0.3) }
@@ -29,6 +32,7 @@ struct StepCardView: View {
 
     private var numberColor: Color {
         if step.isCheckEntry { return Theme.violet }
+        if step.isMistakeEntry { return Theme.red }
         if step.isHeadStartEntry || step.isReplayEntry { return Theme.amber }
         return Theme.textSecondary
     }

@@ -2417,4 +2417,325 @@ struct AutomatedAIBrowserTests {
         #expect(decoded.healedMoves == nil)
         #expect(decoded.callBreakdown == "2 calls — 2 steps")
     }
+
+    // MARK: - Pair 7: the repair that silently stopped pressing Enter
+
+    @Test func aRepairedSearchStepStillPressesEnter() {
+        let saved = typeIntoMove("Search", submits: true)
+        let repaired = saved.retargeted(to: fingerprint("Search products", kind: .field))
+        // The whole point of the repair is that the step keeps working. A repair
+        // that finds the box and never submits looks like a success and is not one.
+        #expect(repaired.submits == true)
+        #expect(repaired.target?.name == "Search products")
+    }
+
+    @Test func aRepairChangesWhereToLookAndNothingElse() {
+        let saved = RecipeMove(
+            action: AgentActionKind.typeInto.rawValue,
+            target: fingerprint("Search", kind: .field),
+            expectedReaction: "the address changed",
+            isCommitting: true,
+            valueKind: "what you're looking for",
+            submits: true,
+            direction: "down",
+            amount: 600,
+            urlString: "https://shop.test/deals"
+        )
+        let repaired = saved.retargeted(to: fingerprint("Find", kind: .field))
+        #expect(repaired.id == saved.id)
+        #expect(repaired.action == saved.action)
+        #expect(repaired.expectedReaction == saved.expectedReaction)
+        #expect(repaired.isCommitting == saved.isCommitting)
+        #expect(repaired.valueKind == saved.valueKind)
+        #expect(repaired.submits == saved.submits)
+        #expect(repaired.direction == saved.direction)
+        #expect(repaired.amount == saved.amount)
+        #expect(repaired.urlString == saved.urlString)
+        #expect(repaired.target?.name == "Find")
+    }
+
+    // MARK: - Pair 7: a replay is never saved with a step it cannot perform
+
+    @Test func aRunIsNeverSavedAsAReplayThatStopsDeadPartWayThrough() {
+        let form = RecipeMove(
+            action: AgentActionKind.fillForm.rawValue,
+            target: fingerprint("Checkout"),
+            isCommitting: true
+        )
+        let route = RoutineBuilder.savableRoute(from: [
+            typeIntoMove("Search"),
+            tapMove("Sort"),
+            form,
+            tapMove("Never reached"),
+        ])
+        #expect(route.count == 2)
+        #expect(route.last?.target?.name == "Sort")
+    }
+
+    @Test func aRouteWhoseFirstStepCannotBeReplayedIsNotSavedAtAll() {
+        let overview = RecipeMove(action: AgentActionKind.pageOverview.rawValue)
+        #expect(RoutineBuilder.savableRoute(from: [overview, tapMove("Sort")]).isEmpty)
+        #expect(RoutineBuilder.make(
+            goal: "g",
+            host: "shop.test",
+            title: "T",
+            moves: [overview, tapMove("Sort")],
+            typedValues: [:]
+        ) == nil)
+    }
+
+    @Test func aStepThatCommitsIsStillWorthSavingBecauseItStopsAndAsks() {
+        // Committing moves belong in a replay — they just never run unattended.
+        #expect(tapMove("Place order", committing: true).isSavableInRoutine)
+        #expect(typeIntoMove("Card number", committing: true).isSavableInRoutine)
+        // A form fill needs several values at once, so a replay cannot run it.
+        #expect(!RecipeMove(
+            action: AgentActionKind.fillForm.rawValue,
+            target: fingerprint("Checkout"),
+            isCommitting: true
+        ).isSavableInRoutine)
+    }
+
+    @Test func aSavedReplayStaysAShortcutRatherThanBecomingAWorkflow() {
+        let long = (1...12).map { tapMove("Step \($0)") }
+        #expect(RoutineBuilder.savableRoute(from: long).count == RoutineBuilder.maxMoves)
+    }
+
+    // MARK: - Pair 7: history remembers replays, repairs and cautions
+
+    @Test func historyRemembersWhichReplayRanAndWhatItCost() throws {
+        let run = AgentRun(
+            id: UUID(),
+            goal: "g",
+            date: Date(timeIntervalSince1970: 0),
+            outcome: .completed,
+            summary: "s",
+            steps: [],
+            fastSteps: 4,
+            preciseSteps: 2,
+            planningCalls: 1,
+            checkCalls: 1,
+            routineTitle: "Morning order",
+            healedMoves: 2,
+            repairCalls: 1,
+            cautionsUsed: 2,
+            mistakesFlagged: 1
+        )
+        let decoded = try JSONDecoder().decode(AgentRun.self, from: JSONEncoder().encode(run))
+        #expect(decoded.routineTitle == "Morning order")
+        #expect(decoded.healedMoves == 2)
+        #expect(decoded.cautionLine == "2 cautions from earlier failures on this site")
+        #expect(decoded.mistakeLine == "you flagged 1 mistake")
+        // The repair is billed as a repair rather than hidden inside thinking.
+        #expect(decoded.callBreakdown == "6 calls — 3 steps, 1 plan, 1 check, 1 repair")
+    }
+
+    @Test func aRunWhereYouNeverSteppedInSaysNothingAboutMistakes() {
+        let run = AgentRun(
+            id: UUID(),
+            goal: "g",
+            date: Date(timeIntervalSince1970: 0),
+            outcome: .completed,
+            summary: "s",
+            steps: []
+        )
+        #expect(run.mistakeLine == nil)
+        #expect(run.cautionLine == nil)
+    }
+
+    // MARK: - Pair 7: a failure always leaves something behind to learn from
+
+    @Test func aRunThatRanOutOfStepsLeavesACautionToRecord() {
+        let drafts = LessonDistiller.read(LessonDistiller.Evidence(
+            moves: [ranMove(.tapElement, "Apply", result: ReactionWatch.noReactionPhrase)],
+            outcome: .failed,
+            hitStepLimit: true
+        ))
+        #expect(!drafts.isEmpty)
+        #expect(drafts.contains { $0.kind == .deadControl })
+        // One rule for "what did this run learn", used both to write the cautions
+        // down and to decide which old ones went unseen.
+        #expect(Set(drafts.map { $0.kind }).count == drafts.count)
+    }
+
+    @Test func aCleanRunOnAQuietSiteLeavesNothingToLearn() {
+        let drafts = LessonDistiller.read(LessonDistiller.Evidence(
+            moves: [ranMove(.tapElement, "Sort")],
+            outcome: .completed,
+            verdict: .confirmed
+        ))
+        #expect(drafts.isEmpty)
+    }
+
+    // MARK: - Pair 7: your objection reaches the agent intact
+
+    @Test func yourWordsReachTheAgentExactlyAsYouWroteThem() {
+        let rule = MistakeBriefing.standingRule(
+            move: "tap the link “Sponsored”",
+            note: "that's the sponsored result, not the real one"
+        )
+        #expect(rule.contains("\"that's the sponsored result, not the real one\""))
+        #expect(rule.contains("WORD FOR WORD"))
+    }
+
+    @Test func theMoveYouFlaggedIsNamedAndSaidToBeBarred() {
+        let rule = MistakeBriefing.standingRule(move: "tap the link “Sponsored”", note: "wrong one")
+        #expect(rule.contains("tap the link “Sponsored”"))
+        #expect(rule.localizedCaseInsensitiveContains("barred"))
+    }
+
+    @Test func flaggingWithNothingWrittenStillMakesAUsableObjection() {
+        let rule = MistakeBriefing.standingRule(move: "tap the button “Buy”", note: "   ")
+        #expect(!rule.isEmpty)
+        #expect(rule.localizedCaseInsensitiveContains("did not say what was wrong"))
+        #expect(!rule.contains("WORD FOR WORD"))
+    }
+
+    @Test func theRewriteIsDemandedBeforeThePageIsTouchedAgain() {
+        let rule = MistakeBriefing.standingRule(move: "scroll down", note: "wrong direction")
+        let demand = MistakeBriefing.rewriteDemand(rule: rule)
+        #expect(demand.hasPrefix(rule))
+        #expect(demand.contains("revise_plan"))
+        // The honest part: this costs the turn it was going to spend anyway.
+        #expect(demand.contains("not an extra one"))
+    }
+
+    @Test func whenNoRewriteIsLeftYourObjectionIsHeldAsAHardRuleInstead() {
+        let rule = MistakeBriefing.standingRule(move: "scroll down", note: "wrong direction")
+        // The rule on its own never demands a rewrite — that is what makes it
+        // usable when the mission's rewrites are gone.
+        #expect(!rule.contains("revise_plan"))
+        #expect(!rule.contains("BEFORE YOU TOUCH THE PAGE AGAIN"))
+        #expect(rule.localizedCaseInsensitiveContains("outrank"))
+    }
+
+    @Test func aVeryLongObjectionIsTrimmedRatherThanCrowdingOutThePage() {
+        let long = String(repeating: "x", count: 600)
+        let rule = MistakeBriefing.standingRule(move: nil, note: long)
+        #expect(!rule.contains(String(repeating: "x", count: MistakeBriefing.maxNoteLength + 1)))
+    }
+
+    @Test func reachingForThePageAnywayIsSaidPlainlyAndOnlyToleratedOnce() {
+        let rule = MistakeBriefing.standingRule(move: "tap the button “Buy”", note: "not that one")
+        let refusal = MistakeBriefing.refusalDemand(rule: rule)
+        #expect(refusal.hasPrefix(rule))
+        #expect(refusal.contains("WAS REFUSED"))
+        #expect(MistakeBriefing.maxRefusals == 1)
+        #expect(MistakeBriefing.barredLine.localizedCaseInsensitiveContains("barred"))
+        #expect(MistakeBriefing.rewriteFirstLine.localizedCaseInsensitiveContains("rewritten"))
+    }
+
+    @Test func theSameMoveIsRecognisedAgainSoABarCanActuallyBeEnforced() {
+        var flagged = AgentAction(type: AgentActionKind.tapElement.rawValue)
+        flagged.element = 12
+        var again = AgentAction(type: AgentActionKind.tapElement.rawValue)
+        again.element = 12
+        var different = AgentAction(type: AgentActionKind.tapElement.rawValue)
+        different.element = 13
+
+        let barred: Set<String> = [flagged.repetitionSignature]
+        #expect(barred.contains(again.repetitionSignature))
+        #expect(!barred.contains(different.repetitionSignature))
+    }
+
+    @Test func yourObjectionIsYourOwnEntryInTheLog() {
+        var action = AgentAction(type: AgentActionKind.mistake.rawValue)
+        action.summary = "that's the sponsored result"
+        let step = AgentStep(
+            index: 4,
+            action: action,
+            reasoning: "you rejected: tap the link “Sponsored”",
+            result: "that move is barred for the rest of the run",
+            status: .terminal,
+            snapshot: nil,
+            pageMap: nil
+        )
+        #expect(step.isMistakeEntry)
+        #expect(step.displayNumber == "!")
+        #expect(step.action.detailText == "that's the sponsored result")
+    }
+
+    @Test func theAgentCanNeverFileAnObjectionAgainstItself() {
+        // The app writes this entry, so a hallucinated tool of the same name must
+        // never be accepted as a move — and it is not a page action either, so it
+        // can never end up in a saved route.
+        #expect(!AgentActionKind.mistake.isModelCallable)
+        #expect(!AgentActionKind.mistake.isPageAction)
+    }
+
+    @Test func yourObjectionIsMarkedAsYoursInSavedHistoryToo() {
+        let step = PersistedStep(
+            id: UUID(),
+            index: 4,
+            actionType: AgentActionKind.mistake.rawValue,
+            actionDetail: "that's the sponsored result",
+            reasoning: "r",
+            result: nil,
+            statusRaw: StepStatus.terminal.rawValue,
+            thumbnailFile: nil
+        )
+        #expect(step.kind == .mistake)
+        #expect(step.displayNumber == "!")
+    }
+
+    // MARK: - Pair 7: the live thinking panel
+
+    @Test func aMoveIsDescribedInPlainWordsWithNoElementNumbers() {
+        var tap = AgentAction(type: AgentActionKind.tapElement.rawValue)
+        tap.element = 14
+        tap.elementName = "button “Apply filter”"
+        #expect(tap.plainSentence == "tap the button “Apply filter”")
+        #expect(!tap.plainSentence.contains("14"))
+        #expect(!tap.plainSentence.contains("["))
+    }
+
+    @Test func typingSaysWhetherItWillPressEnter() {
+        var typing = AgentAction(type: AgentActionKind.typeInto.rawValue)
+        typing.element = 7
+        typing.elementName = "field “Search”"
+        typing.text = "red trainers"
+        #expect(!typing.plainSentence.contains("press enter"))
+        typing.submit = true
+        #expect(typing.plainSentence.contains("press enter"))
+        #expect(typing.plainSentence.contains("red trainers"))
+    }
+
+    @Test func aMoveWithNoResolvedTargetStillReadsAsASentence() {
+        let tap = AgentAction(type: AgentActionKind.tapElement.rawValue)
+        #expect(tap.plainSentence == "tap a control")
+    }
+
+    @Test func everyMoveTheAgentCanMakeHasSomethingReadableToSay() {
+        for kind in AgentActionKind.allCases {
+            let sentence = AgentAction(type: kind.rawValue).plainSentence
+            #expect(!sentence.trimmed.isEmpty, "\(kind.rawValue) has nothing to say")
+        }
+    }
+
+    @Test func aPageThatRanButDidNothingIsNotReadAsASuccess() {
+        #expect(ReactionWatch.readsAsNoReaction("tapped [4] · \(ReactionWatch.noReactionPhrase)"))
+        #expect(!ReactionWatch.readsAsNoReaction("tapped [4] · page reacted (3 changes)"))
+    }
+
+    @Test func aRealFailureIsStillReadAsAFailure() {
+        #expect(ReactionWatch.readsAsFailure("couldn't tap — [4] is no longer on the page"))
+        #expect(!ReactionWatch.readsAsFailure("tapped [4] · page reacted (3 changes)"))
+    }
+
+    @Test @MainActor func theResultLineIsColouredHonestlyRatherThanOptimistically() {
+        #expect(LiveThinkingPanel.resultColor("tapped [4] · page reacted (3 changes)") == Theme.green)
+        #expect(LiveThinkingPanel.resultColor("tapped [4] · \(ReactionWatch.noReactionPhrase)") == Theme.amber)
+        #expect(LiveThinkingPanel.resultColor("couldn't tap — [4] is no longer on the page") == Theme.red)
+    }
+
+    @Test func theTaskRailHasItsOwnMarkerForEveryStateAPlanCanBeIn() {
+        let markers = [
+            MissionTaskState.pending.icon,
+            MissionTaskState.current.icon,
+            MissionTaskState.done.icon,
+            MissionTaskState.skipped.icon,
+        ]
+        #expect(markers.allSatisfy { !$0.isEmpty })
+        #expect(Set(markers).count == 4)
+    }
 }

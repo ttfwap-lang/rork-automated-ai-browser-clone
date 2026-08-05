@@ -53,6 +53,15 @@ struct ContentView: View {
         }
         .padding(.horizontal, 10)
         .padding(.top, 8)
+        // Sits over the page rather than beside it, so watching the site and
+        // following the reasoning are the same act. Only the panel's own frame
+        // takes taps — everything around it lands on the page.
+        .overlay(alignment: .top) {
+            if agent.isRunning {
+                LiveThinkingPanel()
+            }
+        }
+        .animation(.spring(response: 0.4, dampingFraction: 0.85), value: agent.isRunning)
     }
 
     private var bottomDock: some View {

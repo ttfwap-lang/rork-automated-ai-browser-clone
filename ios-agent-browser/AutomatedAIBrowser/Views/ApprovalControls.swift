@@ -4,6 +4,7 @@ import SwiftUI
 struct ApprovalControls: View {
     @Environment(AgentViewModel.self) private var agent
     var showReasoning = true
+    @State private var isFlagging = false
 
     var body: some View {
         if let step = agent.pendingStep {
@@ -59,6 +60,11 @@ struct ApprovalControls: View {
                     }
                     .buttonStyle(PressableButtonStyle())
                 }
+
+                // Rejecting ends the run. Flagging keeps it going with a route it
+                // has to rethink — two different things, so neither hides behind
+                // the other.
+                mistakeButton
             }
             .padding(12)
             .background(Theme.elevated, in: RoundedRectangle(cornerRadius: 16))
@@ -66,6 +72,32 @@ struct ApprovalControls: View {
                 RoundedRectangle(cornerRadius: 16)
                     .strokeBorder(Theme.amber.opacity(0.35), lineWidth: 1)
             )
+            .sheet(isPresented: $isFlagging) {
+                MistakeSheet()
+            }
         }
+    }
+
+    private var mistakeButton: some View {
+        Button {
+            Haptics.warning()
+            isFlagging = true
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: "hand.raised.slash.fill")
+                    .font(.system(size: 9, weight: .bold))
+                Text("THAT'S A MISTAKE — RETHINK THE ROUTE")
+                    .techLabel(9)
+            }
+            .foregroundStyle(Theme.red)
+            .frame(maxWidth: .infinity)
+            .frame(height: 34)
+            .background(Theme.red.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .strokeBorder(Theme.red.opacity(0.3), lineWidth: 1)
+            )
+        }
+        .buttonStyle(PressableButtonStyle())
     }
 }

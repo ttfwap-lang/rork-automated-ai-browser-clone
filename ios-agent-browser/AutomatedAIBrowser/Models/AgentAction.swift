@@ -112,8 +112,69 @@ nonisolated struct AgentAction: Codable, Equatable {
             return summary ?? ""
         case .replay:
             return summary ?? ""
+        case .mistake:
+            return summary ?? ""
         case .unknown:
             return type
+        }
+    }
+
+    /// The move in plain words, with no element numbers — for the live panel,
+    /// where the point is to read what the agent is doing at a glance rather than
+    /// to audit it.
+    var plainSentence: String {
+        let target = (elementName ?? "").trimmed
+        let named = target.isEmpty ? nil : target
+        switch kind {
+        case .tapElement:
+            return named.map { "tap the \($0)" } ?? "tap a control"
+        case .longPress:
+            return named.map { "press and hold the \($0)" } ?? "press and hold"
+        case .hover:
+            return named.map { "hover over the \($0)" } ?? "hover"
+        case .typeInto, .typeText:
+            let where_ = named.map { " into the \($0)" } ?? ""
+            let quoted = (text ?? "").isEmpty ? "" : " “\(String((text ?? "").prefix(28)))”"
+            return "type\(quoted)\(where_)\(submit == true ? " and press enter" : "")"
+        case .fillForm:
+            let count = fields?.count ?? 0
+            return "fill in \(count) field\(count == 1 ? "" : "s")\(submit == true ? " and submit" : "")"
+        case .selectOption:
+            let option = (option ?? "").isEmpty ? "an option" : "“\(String((option ?? "").prefix(24)))”"
+            return named.map { "choose \(option) from the \($0)" } ?? "choose \(option)"
+        case .setToggle:
+            return "turn the \(named ?? "switch") \(on == false ? "off" : "on")"
+        case .setSlider:
+            return "set the \(named ?? "slider") to \(Int(value ?? 50))%"
+        case .drag:
+            return "drag one thing onto another"
+        case .swipe:
+            return "swipe \(direction ?? "left")"
+        case .tap:
+            return "tap a spot on the page"
+        case .scroll:
+            return "scroll \(direction ?? "down")"
+        case .navigate:
+            return "open \(RecipeMove.shortAddress(url ?? ""))"
+        case .back:
+            return "go back"
+        case .extract:
+            return "read the whole page"
+        case .pageOverview:
+            return "look at the whole page at once"
+        case .wait:
+            return "wait for the page"
+        case .revisePlan:
+            let count = tasks?.count ?? 0
+            return "rewrite the plan — \(count) task\(count == 1 ? "" : "s") ahead"
+        case .rewind:
+            return "go back to checkpoint \(bookmark ?? 0)"
+        case .done:
+            return "call it done"
+        case .fail:
+            return "report that this cannot be done"
+        case .verify, .headStart, .replay, .mistake, .unknown:
+            return kind.label.lowercased()
         }
     }
 

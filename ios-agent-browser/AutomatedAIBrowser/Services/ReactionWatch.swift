@@ -171,6 +171,13 @@ nonisolated enum ReactionWatch {
         return signals.contains { lower.contains($0) }
     }
 
+    /// True when the move ran but the page did nothing — not a failure, not a
+    /// success. Kept apart from `readsAsFailure` so the live panel can colour it
+    /// amber instead of lying in either direction.
+    static func readsAsNoReaction(_ result: String) -> Bool {
+        result.localizedCaseInsensitiveContains(noReactionPhrase)
+    }
+
     // MARK: - In-page watcher scripts
 
     static let startScript = #"""
