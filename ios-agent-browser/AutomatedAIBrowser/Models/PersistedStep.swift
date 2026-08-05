@@ -26,6 +26,8 @@ nonisolated struct PersistedStep: Codable, Identifiable, Hashable {
     var wasReplayed: Bool? = nil
     /// True when a saved step had to be repaired because the site had moved it.
     var wasHealed: Bool? = nil
+    /// What the free field matching worked out on a dossier fill.
+    var dossierNote: String? = nil
 
     var kind: AgentActionKind {
         AgentActionKind(rawValue: actionType) ?? .unknown

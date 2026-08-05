@@ -45,6 +45,11 @@ nonisolated struct AgentRun: Codable, Identifiable, Hashable {
     var cautionsUsed: Int? = nil
     /// How many times you told the agent a move was a mistake.
     var mistakesFlagged: Int? = nil
+    /// How many form fields were filled from your own dossier.
+    var dossierFills: Int? = nil
+    /// How many of this run's form fields were worked out for nothing — by the
+    /// page declaring its purpose, by its label, or by your iPhone reading it.
+    var freeFieldMatches: Int? = nil
 
     var verdict: VerificationVerdict? {
         verdictRaw.flatMap { VerificationVerdict(rawValue: $0) }
@@ -91,6 +96,19 @@ nonisolated struct AgentRun: Codable, Identifiable, Hashable {
     var cautionLine: String? {
         guard let cautionsUsed, cautionsUsed > 0 else { return nil }
         return "\(cautionsUsed) caution\(cautionsUsed == 1 ? "" : "s") from earlier failures on this site"
+    }
+
+    /// "18 fields filled from your dossier — 20 matched free" — nil when no form
+    /// was filled from your details.
+    var dossierLine: String? {
+        let filled = dossierFills ?? 0
+        let matched = freeFieldMatches ?? 0
+        guard filled > 0 || matched > 0 else { return nil }
+        var line = "\(filled) field\(filled == 1 ? "" : "s") filled from your dossier"
+        if matched > filled {
+            line += " — \(matched) matched free on this iPhone"
+        }
+        return line
     }
 
     /// "You flagged 1 mistake" — nil when you never stepped in.

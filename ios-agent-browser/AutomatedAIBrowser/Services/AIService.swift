@@ -46,10 +46,16 @@ nonisolated struct AIService {
         let cautionNote: String?
         /// The watching person's own objection to a move, in their words.
         let mistakeNote: String?
+        /// Which of the person's own details are on file — names only, never values
+        /// — plus what this page's form looks like. nil when the dossier is off,
+        /// empty, or the page has no form worth offering it to.
+        let dossierNote: String?
         /// True when the agent may answer with a shortlist instead of one move.
         let allowShortlist: Bool
         /// True when there is at least one checkpoint to rewind to.
         let hasBookmarks: Bool
+        /// True when the dossier fill is available on this page.
+        let hasDossier: Bool
         let modelID: String
 
         var hasPlan: Bool { !(planBriefing ?? "").isEmpty }
@@ -282,6 +288,13 @@ nonisolated struct AIService {
             required: ["fields"]
         ),
         tool(
+            "fill_from_dossier",
+            "Fill this form from the person's OWN SAVED DETAILS. You do not supply any values and you never see one: the app reads every field on the page, works out for free which of the person's details each field is asking for, and types them itself. Use this the moment you meet a form with more than one personal detail on it — it is one move instead of many, and it costs a fraction of typing them one at a time. The result tells you exactly what landed, what was left blank because nothing is stored for it, and which fields you still have to handle yourself. Passwords, cards and security codes are never filled by it.",
+            properties: [
+                "submit": .boolean("Press Enter on the last filled field to submit the form. Leave this out unless you are certain the form is complete — a half-filled form that submits is worse than one that waits."),
+            ]
+        ),
+        tool(
             "select_option",
             "Choose an option from a dropdown (kind: dropdown). Real menus are set directly with the option's visible text; custom dropdowns are opened so their options appear as numbered elements on the next look.",
             properties: [
@@ -474,8 +487,17 @@ nonisolated struct AIService {
     )
 
     /// The tool set for one decision turn.
-    nonisolated static func tools(hasPlan: Bool, hasBookmarks: Bool = false, allowShortlist: Bool = false) -> [ToolDefinition] {
-        var set = agentTools
+    ///
+    /// The dossier fill is removed from the set entirely when it is unavailable,
+    /// rather than offered and refused: a tool the model cannot see is a tool it
+    /// cannot waste a turn on.
+    nonisolated static func tools(
+        hasPlan: Bool,
+        hasBookmarks: Bool = false,
+        allowShortlist: Bool = false,
+        hasDossier: Bool = false
+    ) -> [ToolDefinition] {
+        var set = hasDossier ? agentTools : agentTools.filter { $0.function.name != "fill_from_dossier" }
         if hasPlan { set.append(revisePlanTool) }
         if hasBookmarks { set.append(rewindTool) }
         if allowShortlist { set.append(weighOptionsTool) }
@@ -605,7 +627,8 @@ nonisolated struct AIService {
             tools: Self.tools(
                 hasPlan: request.hasPlan,
                 hasBookmarks: request.hasBookmarks,
-                allowShortlist: request.allowShortlist
+                allowShortlist: request.allowShortlist,
+                hasDossier: request.hasDossier
             )
         )
     }
@@ -844,6 +867,10 @@ nonisolated struct AIService {
         }
         if let cautions = request.cautionNote, !cautions.isEmpty {
             lines.append(cautions)
+            lines.append("")
+        }
+        if let dossier = request.dossierNote, !dossier.isEmpty {
+            lines.append(dossier)
             lines.append("")
         }
         if let bookmarks = request.bookmarksNote, !bookmarks.isEmpty {

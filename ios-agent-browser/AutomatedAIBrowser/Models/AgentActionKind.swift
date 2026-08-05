@@ -5,6 +5,9 @@ nonisolated enum AgentActionKind: String, Codable, CaseIterable {
     case tapElement = "tap_element"
     case typeInto = "type_into"
     case fillForm = "fill_form"
+    /// Fill a form from the person's own dossier. The values are resolved on the
+    /// device at act time — the model asks for the fill, and never sees a value.
+    case fillFromDossier = "fill_from_dossier"
     case selectOption = "select_option"
     case setToggle = "set_toggle"
     case setSlider = "set_slider"
@@ -42,6 +45,7 @@ nonisolated enum AgentActionKind: String, Codable, CaseIterable {
         case .tapElement: "TAP"
         case .typeInto: "TYPE"
         case .fillForm: "FILL"
+        case .fillFromDossier: "AUTOFILL"
         case .selectOption: "SELECT"
         case .setToggle: "TOGGLE"
         case .setSlider: "SLIDER"
@@ -74,6 +78,7 @@ nonisolated enum AgentActionKind: String, Codable, CaseIterable {
         case .tapElement: "hand.tap.fill"
         case .typeInto: "keyboard.fill"
         case .fillForm: "square.and.pencil"
+        case .fillFromDossier: "person.text.rectangle.fill"
         case .selectOption: "chevron.down.circle.fill"
         case .setToggle: "switch.2"
         case .setSlider: "slider.horizontal.3"

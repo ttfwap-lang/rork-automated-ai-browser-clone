@@ -66,6 +66,8 @@ nonisolated struct AgentAction: Codable, Equatable {
         case .fillForm:
             let count = fields?.count ?? 0
             return "\(count) field\(count == 1 ? "" : "s")\(submit == true ? " + submit" : "")"
+        case .fillFromDossier:
+            return "from your dossier\(submit == true ? " + submit" : "")"
         case .selectOption:
             return "\"\(String((option ?? "?").prefix(32)))\" → \(targetDescriptor)"
         case .setToggle:
@@ -139,6 +141,8 @@ nonisolated struct AgentAction: Codable, Equatable {
         case .fillForm:
             let count = fields?.count ?? 0
             return "fill in \(count) field\(count == 1 ? "" : "s")\(submit == true ? " and submit" : "")"
+        case .fillFromDossier:
+            return "fill this form in from your dossier\(submit == true ? " and submit" : "")"
         case .selectOption:
             let option = (option ?? "").isEmpty ? "an option" : "“\(String((option ?? "").prefix(24)))”"
             return named.map { "choose \(option) from the \($0)" } ?? "choose \(option)"

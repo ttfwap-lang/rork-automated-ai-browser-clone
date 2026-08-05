@@ -33,6 +33,10 @@ final class AgentViewModel {
     /// replays built out of runs that worked.
     private let lessonBook: LessonBook
     private let routines: RoutineStore
+    /// Your own details. Values leave here for exactly one destination — a matched
+    /// field on the page — and are never routed into a briefing, a plan, a memory
+    /// or run history.
+    private let dossier: Dossier
     private let ai = AIService()
 
     private var runTask: Task<Void, Never>?
@@ -112,6 +116,13 @@ final class AgentViewModel {
     private(set) var healedMoveCount = 0
     /// Paid calls spent working out where a moved control had gone.
     private(set) var repairCallCount = 0
+    /// Form fields filled from your dossier this run.
+    private(set) var dossierFillCount = 0
+    /// Fields worked out for nothing — declared purpose, own label, or your
+    /// iPhone reading the label. Deliberately kept out of every paid total.
+    private(set) var freeFieldMatchCount = 0
+    /// What the last dossier fill worked out, held for the step card.
+    private var pendingDossierNote: String?
     /// This site's cautions, as the planner and the agent read them.
     private var cautionNote: String?
     /// Which cautions were handed over, so the ones that turn out not to apply
@@ -166,7 +177,8 @@ final class AgentViewModel {
         onDevice: OnDeviceModel,
         vault: RecipeVault,
         lessons: LessonBook,
-        routines: RoutineStore
+        routines: RoutineStore,
+        dossier: Dossier
     ) {
         self.settings = settings
         self.history = history
@@ -174,6 +186,7 @@ final class AgentViewModel {
         self.vault = vault
         self.lessonBook = lessons
         self.routines = routines
+        self.dossier = dossier
         self.mode = settings.defaultMode
     }
 
@@ -462,8 +475,10 @@ final class AgentViewModel {
                     memoryNote: memoryNote,
                     cautionNote: cautionNote,
                     mistakeNote: mistake,
+                    dossierNote: dossierNote(for: observation),
                     allowShortlist: allowShortlist,
                     hasBookmarks: settings.bookmarksEnabled && !bookmarks.isEmpty && !checkpointsUnavailable,
+                    hasDossier: canOfferDossier(for: observation),
                     modelID: route.choice.modelID
                     ))
                 } catch {
@@ -631,6 +646,8 @@ final class AgentViewModel {
             }
             steps[steps.count - 1].result = resultText
             steps[steps.count - 1].status = .executed
+            steps[steps.count - 1].dossierNote = pendingDossierNote
+            pendingDossierNote = nil
             extracted = execution.extracted
             lastResultLine = resultText
             recordExecutedMove(resolvedAction, fingerprint: fingerprint, result: resultText)
@@ -1816,6 +1833,128 @@ final class AgentViewModel {
         return MistakeBriefing.rewriteFirstLine
     }
 
+    // MARK: - Your own details
+
+    /// True when the dossier fill is worth offering on this page: the feature is
+    /// on, you have filled in enough to be useful, and the page actually has
+    /// empty fields on it. A tool the agent cannot use is a turn it can waste.
+    private func canOfferDossier(for observation: PageObservation?) -> Bool {
+        guard settings.dossierEnabled, dossier.canHelpWithForms else { return false }
+        return emptyFieldCount(in: observation) >= 2
+    }
+
+    /// Empty, editable fields visible on screen — the cheap signal that this page
+    /// is a form, read off the scan that already happened.
+    private func emptyFieldCount(in observation: PageObservation?) -> Int {
+        guard let observation else { return 0 }
+        return observation.elements.filter { element in
+            element.kind == .field && element.states.contains("empty")
+        }.count
+    }
+
+    /// What the agent is told about your details: the NAMES of the facts on file,
+    /// and nothing else. No values, ever — not truncated, not masked, not hinted.
+    private func dossierNote(for observation: PageObservation?) -> String? {
+        guard canOfferDossier(for: observation) else { return nil }
+        let names = dossier.availableFactNames()
+        guard !names.isEmpty else { return nil }
+        let count = emptyFieldCount(in: observation)
+        return """
+        THIS PAGE LOOKS LIKE A FORM — \(count) empty field\(count == 1 ? "" : "s") on screen — AND THE PERSON HAS \(names.count) OF THEIR OWN DETAILS ON FILE: \(names.joined(separator: ", ")).
+        Call fill_from_dossier ONCE to fill everything it can in a single move. You do not choose the fields and you never see a value: the app reads the form itself, works out for free which detail each field wants, and types them. It then tells you exactly what landed, what it left blank because nothing is stored for it, and which fields are still yours to handle. Do not type these details field by field — that costs the person a call per field for work that is free.
+        """
+    }
+
+    /// The whole free-matching pass, then the fill.
+    ///
+    /// Every stage of the matching is free: the page's own declared purposes, the
+    /// phrase table, and — only for what is left — this iPhone's model. None of it
+    /// touches the paid tally, and the values go straight from the dossier into
+    /// the page without passing through a prompt.
+    private func performDossierFill(submit: Bool) async -> String {
+        guard settings.dossierEnabled else {
+            return "filling from your details is switched off in Settings — type the fields yourself, or ask the person to turn it on"
+        }
+        guard dossier.canHelpWithForms else {
+            return "the person's dossier is empty, so there is nothing to fill from — handle these fields yourself"
+        }
+
+        phase = .matching
+        let probes = await webProxy.probeFormFields()
+        guard !probes.isEmpty else {
+            return "couldn't read this form's fields — the page blocked it or there are no fillable fields here; use type_into instead"
+        }
+
+        // Passes 1 and 2: free, instant, and no model involved at all.
+        var (matches, leftovers) = FieldMatcher.match(probes)
+
+        // Pass 3: only the genuine oddities, and only when this iPhone can read
+        // them. A failure here costs nothing and simply leaves them unmatched.
+        if !leftovers.isEmpty, isFreeTierReady {
+            let read = await readLeftovers(leftovers)
+            if !read.isEmpty {
+                let placed = Set(read.map(\.id))
+                matches = FieldMatcher.dedupe(matches + read)
+                leftovers = leftovers.filter { !placed.contains($0.id) }
+            }
+        }
+
+        let plan = FieldMatcher.plan(
+            probes: probes,
+            matches: matches,
+            available: dossier.filledKinds
+        )
+        freeFieldMatchCount += plan.freeMatchCount
+        pendingDossierNote = plan.freeLine
+
+        guard !plan.ready.isEmpty else {
+            phase = .acting
+            return plan.agentReport(filled: 0, failures: [], submitted: false)
+        }
+
+        // The one moment a value exists outside the dossier: on its way into the
+        // field it belongs in.
+        let entries = plan.entries { dossier.value(for: $0) }.map { pair in
+            WebViewProxy.DossierEntry(
+                id: pair.match.id,
+                value: pair.value,
+                expectedName: lastObservation?.element(withID: pair.match.id)?.name ?? pair.match.probe.label,
+                isSelect: pair.match.probe.widget == .select
+            )
+        }
+
+        phase = .acting
+        await webProxy.beginReactionWatch(targetID: entries.first?.id)
+        let outcome = await webProxy.fillFromDossier(entries, submit: submit)
+        try? await Task.sleep(for: .milliseconds(700))
+        let watcher = await webProxy.endReactionWatch()
+
+        dossierFillCount += outcome.filled
+        let report = plan.agentReport(
+            filled: outcome.filled,
+            failures: outcome.failures,
+            submitted: submit
+        )
+        return ReactionWatch.combine(report, watcher)
+    }
+
+    /// Asks this iPhone to read the labels the phrase table couldn't place.
+    /// Strictly checked, and silently skipped on any refusal — an unmatched field
+    /// is handed back to the agent by name, which is honest and costs nothing.
+    private func readLeftovers(_ leftovers: [FormFieldProbe]) async -> [FieldMatch] {
+        var found: [FieldMatch] = []
+        for batch in OnDeviceFieldReader.batches(leftovers) {
+            guard !Task.isCancelled else { break }
+            let answer = await onDevice.ask(
+                instructions: OnDeviceFieldReader.instructions,
+                prompt: OnDeviceFieldReader.prompt(for: batch)
+            )
+            guard let text = answer.text else { continue }
+            found.append(contentsOf: OnDeviceFieldReader.parse(text, asking: batch))
+        }
+        return found
+    }
+
     // MARK: - Memory ceiling
 
     /// How many recent steps keep their screenshots at full resolution.
@@ -2236,6 +2375,9 @@ final class AgentViewModel {
             try? await Task.sleep(for: .milliseconds(800))
             let verdict = await webProxy.endReactionWatch()
             return (ReactionWatch.combine(result, verdict), nil)
+        case .fillFromDossier:
+            let report = await performDossierFill(submit: action.submit ?? false)
+            return (report, nil)
         case .selectOption:
             guard let elementID = action.element else {
                 return ("select_option was missing its element number — look at the page and try again", nil)
@@ -2508,7 +2650,8 @@ final class AgentViewModel {
                 difficultyRaw: step.difficulty?.rawValue,
                 weighedCount: step.candidates.isEmpty ? nil : step.candidates.count,
                 wasReplayed: step.isReplayed ? true : nil,
-                wasHealed: step.wasHealed ? true : nil
+                wasHealed: step.wasHealed ? true : nil,
+                dossierNote: step.dossierNote
             )
         }
         history.add(AgentRun(
@@ -2535,7 +2678,9 @@ final class AgentViewModel {
             healedMoves: healedMoveCount > 0 ? healedMoveCount : nil,
             repairCalls: repairCallCount > 0 ? repairCallCount : nil,
             cautionsUsed: cautionsUsedCount > 0 ? cautionsUsedCount : nil,
-            mistakesFlagged: mistakeCount > 0 ? mistakeCount : nil
+            mistakesFlagged: mistakeCount > 0 ? mistakeCount : nil,
+            dossierFills: dossierFillCount > 0 ? dossierFillCount : nil,
+            freeFieldMatches: freeFieldMatchCount > 0 ? freeFieldMatchCount : nil
         ))
     }
 

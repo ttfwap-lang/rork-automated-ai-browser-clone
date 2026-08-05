@@ -2738,4 +2738,382 @@ struct AutomatedAIBrowserTests {
         #expect(markers.allSatisfy { !$0.isEmpty })
         #expect(Set(markers).count == 4)
     }
+
+    // MARK: - Pair 7 — the dossier, and free field matching
+
+    /// Builds one probed field. Defaults are "an ordinary empty text field".
+    private func probe(
+        _ id: Int,
+        label: String = "",
+        declared: String = "",
+        attribute: String = "",
+        type: String = "text",
+        widget: FormFieldProbe.Widget = .text,
+        required: Bool = false,
+        empty: Bool = true,
+        sensitive: Bool = false,
+        options: [String] = []
+    ) -> FormFieldProbe {
+        FormFieldProbe(
+            id: id,
+            declared: declared,
+            attribute: attribute,
+            label: label,
+            type: type,
+            widget: widget,
+            isRequired: required,
+            isEmpty: empty,
+            isSensitive: sensitive,
+            options: options
+        )
+    }
+
+    @Test func theDossierCannotHoldASecretAtAll() {
+        // The guarantee is structural: there is no case to put a password in.
+        let names = DossierFieldKind.allCases.map { $0.rawValue.lowercased() + " " + $0.label.lowercased() }
+        for forbidden in ["password", "card", "cvv", "cvc", "security code", "social security", "national insurance", "passcode", "pin"] {
+            #expect(!names.contains { $0.contains(forbidden) }, "the dossier must not be able to hold a \(forbidden)")
+        }
+    }
+
+    @Test func everyFactHasSomethingToShowAndSomethingToMatchOn() {
+        for kind in DossierFieldKind.allCases {
+            #expect(!kind.label.isEmpty)
+            #expect(!kind.placeholder.isEmpty)
+            #expect(!kind.briefingName.isEmpty)
+            #expect(!kind.phrases.isEmpty, "\(kind.rawValue) can never be matched")
+        }
+    }
+
+    @Test func noTwoFactsClaimTheSameDeclaredPurpose() {
+        var seen: [String: DossierFieldKind] = [:]
+        for kind in DossierFieldKind.allCases {
+            for token in kind.declaredTokens {
+                #expect(seen[token] == nil, "\(token) is claimed by both \(seen[token]?.rawValue ?? "") and \(kind.rawValue)")
+                seen[token] = kind
+            }
+        }
+    }
+
+    @Test func everyFactNameIsUniqueSoTheFreeReaderCannotBeAmbiguous() {
+        let names = DossierFieldKind.allCases.map(\.briefingName)
+        #expect(Set(names).count == names.count)
+        #expect(!names.contains("none"), "'none' is the reader's refusal word and must not name a fact")
+    }
+
+    @Test func autocompleteSectionAndModePrefixesAreStripped() {
+        #expect(FieldScripts.normalizeDeclared("section-work shipping address-line1") == "address-line1")
+        #expect(FieldScripts.normalizeDeclared("billing postal-code") == "postal-code")
+        #expect(FieldScripts.normalizeDeclared("EMAIL") == "email")
+        #expect(FieldScripts.normalizeDeclared("off").isEmpty)
+        #expect(FieldScripts.normalizeDeclared("  ").isEmpty)
+    }
+
+    @Test func theProbePayloadParsesIntoFields() {
+        let raw = """
+        {"ok":true,"fields":[
+          {"i":3,"ac":"shipping address-line1","nm":"addr1","lb":"Street  address","tp":"text","wd":"text","rq":true,"em":true,"sn":false,"op":[]},
+          {"i":9,"ac":"","nm":"pwd","lb":"Password","tp":"password","wd":"text","rq":true,"em":true,"sn":true,"op":[]}
+        ]}
+        """
+        let fields = FieldScripts.parse(raw)
+        #expect(fields?.count == 2)
+        #expect(fields?.first?.declared == "address-line1")
+        #expect(fields?.first?.label == "Street address")
+        #expect(fields?.first?.isRequired == true)
+        #expect(fields?.last?.isSensitive == true)
+        #expect(FieldScripts.parse("{\"ok\":false}")?.isEmpty == true)
+        #expect(FieldScripts.parse("blocked") == nil)
+    }
+
+    @Test func aDeclaredFieldNeedsNoGuessingAtAll() {
+        #expect(FieldMatcher.declaredKind(for: probe(1, declared: "family-name")) == .lastName)
+        #expect(FieldMatcher.declaredKind(for: probe(2, declared: "postal-code")) == .postcode)
+        // type=email is a declaration in all but name.
+        #expect(FieldMatcher.declaredKind(for: probe(3, type: "email")) == .email)
+        #expect(FieldMatcher.declaredKind(for: probe(4, type: "tel")) == .phone)
+        #expect(FieldMatcher.declaredKind(for: probe(5)) == nil)
+    }
+
+    @Test func phraseMatchingRespectsWordBoundaries() {
+        // The classic false positive: "state" inside "real estate".
+        #expect(!FieldMatcher.containsPhrase("real estate agent", "state"))
+        #expect(FieldMatcher.containsPhrase("state / province", "state"))
+        #expect(FieldMatcher.containsPhrase("home_state", "state"))
+        #expect(FieldMatcher.containsPhrase("what is your full name?", "full name"))
+        #expect(!FieldMatcher.containsPhrase("name full", "full name"))
+    }
+
+    @Test func theMostSpecificLabelWins() {
+        #expect(FieldMatcher.labelKind(for: probe(1, label: "First name")) == .firstName)
+        #expect(FieldMatcher.labelKind(for: probe(2, label: "Full name")) == .fullName)
+        #expect(FieldMatcher.labelKind(for: probe(3, label: "Name")) == .fullName)
+        #expect(FieldMatcher.labelKind(for: probe(4, label: "Expected salary")) == .salaryExpectation)
+        #expect(FieldMatcher.labelKind(for: probe(5, label: "Do you require sponsorship?")) == .needsSponsorship)
+        #expect(FieldMatcher.labelKind(for: probe(6, label: "Favourite colour")) == nil)
+    }
+
+    @Test func matchingSkipsSecretsFilledFieldsAndWidgetsItCannotWriteTo() {
+        let probes = [
+            probe(1, label: "Email", declared: "email"),
+            probe(2, label: "Password", type: "password", sensitive: true),
+            probe(3, label: "City", empty: false),
+            probe(4, label: "Date of birth", widget: .date),
+            probe(5, label: "Phone", declared: "tel"),
+        ]
+        let (matches, leftovers) = FieldMatcher.match(probes)
+        #expect(matches.map(\.id) == [1, 5])
+        #expect(leftovers.isEmpty)
+        #expect(matches.allSatisfy { $0.source == .declared })
+    }
+
+    @Test func aFieldWithNoRecognisableWordsBecomesALeftover() {
+        let (matches, leftovers) = FieldMatcher.match([probe(7, label: "Question 4")])
+        #expect(matches.isEmpty)
+        #expect(leftovers.map(\.id) == [7])
+    }
+
+    @Test func confirmFieldsAreKeptButTwoWeakGuessesAtOneFactAreNot() {
+        let confirmed = FieldMatcher.dedupe([
+            FieldMatch(probe: probe(1, label: "Email", declared: "email"), kind: .email, source: .declared),
+            FieldMatch(probe: probe(2, label: "Confirm email"), kind: .email, source: .label),
+        ])
+        #expect(confirmed.count == 2, "a form that asks twice on purpose should be filled twice")
+
+        let guessed = FieldMatcher.dedupe([
+            FieldMatch(probe: probe(1, label: "Company"), kind: .currentEmployer, source: .label),
+            FieldMatch(probe: probe(2, label: "Organisation"), kind: .currentEmployer, source: .label),
+        ])
+        #expect(guessed.count == 1, "two guesses at the same fact is a coin toss, not evidence")
+
+        let oneCertain = FieldMatcher.dedupe([
+            FieldMatch(probe: probe(1, label: "Company"), kind: .currentEmployer, source: .label),
+            FieldMatch(probe: probe(2, label: "Employer", declared: "organization"), kind: .currentEmployer, source: .declared),
+        ])
+        #expect(oneCertain.count == 1)
+        #expect(oneCertain.first?.source == .declared, "the field the site declared should win")
+    }
+
+    @Test func theFillPlanSeparatesReadyFromBlankFromUnknown() {
+        let probes = [
+            probe(1, label: "Email", declared: "email"),
+            probe(2, label: "Notice period"),
+            probe(3, label: "Question 4", required: true),
+            probe(4, label: "CVV", sensitive: true),
+            probe(5, label: "City", empty: false),
+            probe(6, label: "Start date", widget: .date),
+        ]
+        let (matches, _) = FieldMatcher.match(probes)
+        let plan = FieldMatcher.plan(probes: probes, matches: matches, available: [.email])
+
+        #expect(plan.ready.map(\.id) == [1])
+        #expect(plan.missing.map(\.id) == [2], "a matched fact with nothing stored must be reported, never invented")
+        #expect(plan.unmatched.map(\.id) == [3])
+        #expect(plan.sensitive.map(\.id) == [4])
+        #expect(plan.alreadyFilled.map(\.id) == [5])
+        #expect(plan.unsupported.map(\.id) == [6])
+        #expect(plan.freeMatchCount == 2)
+    }
+
+    @Test func theFreeLineCountsWhereEachMatchCameFrom() {
+        let plan = FillPlan(
+            ready: [
+                FieldMatch(probe: probe(1, declared: "email"), kind: .email, source: .declared),
+                FieldMatch(probe: probe(2, label: "Notice period"), kind: .noticePeriod, source: .label),
+                FieldMatch(probe: probe(3, label: "Where did you study"), kind: .school, source: .meaning),
+            ],
+            missing: [], unmatched: [], sensitive: [], alreadyFilled: [], unsupported: []
+        )
+        let line = plan.freeLine ?? ""
+        #expect(line.contains("3 fields matched free"))
+        #expect(line.contains("1 the site declared"))
+        #expect(line.contains("1 from their labels"))
+        #expect(line.contains("1 read by your iPhone"))
+        #expect(FillPlan.empty.freeLine == nil)
+    }
+
+    @Test func theReportTellsTheAgentWhatIsStillItsJobAndNeverLeaksAValue() {
+        let probes = [
+            probe(1, label: "Email", declared: "email"),
+            probe(2, label: "Notice period"),
+            probe(3, label: "Question 4", required: true),
+            probe(4, label: "CVV", sensitive: true),
+        ]
+        let (matches, _) = FieldMatcher.match(probes)
+        let plan = FieldMatcher.plan(probes: probes, matches: matches, available: [.email])
+        let report = plan.agentReport(filled: 1, failures: [], submitted: false)
+
+        #expect(report.contains("filled 1 of 1"))
+        #expect(report.contains("LEFT BLANK"))
+        #expect(report.contains("NOT MATCHED"))
+        #expect(report.contains("Question 4"))
+        #expect(report.contains("(required)"))
+        #expect(report.contains("SKIPPED ON PURPOSE"))
+        #expect(!report.lowercased().contains("alex@example.com"))
+    }
+
+    @Test func theFreeReaderIsStrictAboutWhatItAccepts() {
+        let asked = [probe(4, label: "Where did you study"), probe(5, label: "Your postcode")]
+        let matches = OnDeviceFieldReader.parse(
+            """
+            4=school
+            5=made up fact
+            9=email
+            4=city
+            """,
+            asking: asked
+        )
+        #expect(matches.count == 1, "only a real field with a real fact name survives")
+        #expect(matches.first?.id == 4)
+        #expect(matches.first?.kind == .school)
+        #expect(matches.first?.source == .meaning)
+    }
+
+    @Test func theFreeReaderTreatsNoneAndRamblingAsARefusal() {
+        let asked = [probe(4, label: "Question 4")]
+        #expect(OnDeviceFieldReader.parse("4=none", asking: asked).isEmpty)
+        #expect(OnDeviceFieldReader.parse("Sure! I think field 4 is the email one.", asking: asked).isEmpty)
+        #expect(OnDeviceFieldReader.parse("", asking: asked).isEmpty)
+    }
+
+    @Test func theFreeReaderBatchesAndIgnoresFieldsWithNoWords() {
+        let readable = (1...20).map { probe($0, label: "Question \($0)") }
+        let batches = OnDeviceFieldReader.batches(readable + [probe(99)])
+        #expect(batches.count == 2)
+        #expect(batches.first?.count == OnDeviceFieldReader.batchSize)
+        #expect(batches.flatMap { $0 }.count == 20, "a field with no label cannot be read by anyone")
+        #expect(OnDeviceFieldReader.batches([probe(99)]).isEmpty)
+    }
+
+    @Test func theFreeReadersPromptOffersOnlyFactNamesAndNoValues() {
+        let prompt = OnDeviceFieldReader.prompt(for: [probe(4, label: "Where did you study")])
+        #expect(prompt.contains("ALLOWED NAMES"))
+        #expect(prompt.contains("school"))
+        #expect(prompt.contains("4=Where did you study"))
+    }
+
+    @Test func theDossierFillIsTheAppsOwnMoveWithItsOwnWords() {
+        let kind = AgentActionKind.fillFromDossier
+        #expect(kind.rawValue == "fill_from_dossier")
+        #expect(kind.isModelCallable, "the agent has to be able to ask for it")
+        #expect(kind.isPageAction)
+        #expect(kind.label == "AUTOFILL")
+        #expect(!kind.icon.isEmpty)
+
+        var action = AgentAction(type: kind.rawValue)
+        #expect(action.detailText == "from your dossier")
+        #expect(action.plainSentence == "fill this form in from your dossier")
+        action.submit = true
+        #expect(action.detailText.contains("submit"))
+        #expect(action.plainSentence.contains("and submit"))
+    }
+
+    @Test func theDossierMoveIsRemovedFromTheToolSetWhenItCannotBeUsed() {
+        let withDossier = AIService.tools(hasPlan: false, hasDossier: true).map { $0.function.name }
+        let without = AIService.tools(hasPlan: false, hasDossier: false).map { $0.function.name }
+        #expect(withDossier.contains("fill_from_dossier"))
+        #expect(!without.contains("fill_from_dossier"))
+        #expect(without.contains("type_into"), "every other move stays exactly as it was")
+        #expect(withDossier.count == without.count + 1)
+    }
+
+    @Test func theDossierFillCallParsesWithNoValuesInIt() {
+        let turn = AIService.turn(
+            fromToolNamed: "fill_from_dossier",
+            argumentsJSON: "{\"submit\":true,\"reasoning\":\"this is the application form\"}"
+        )
+        guard case .move(let decision) = turn else {
+            #expect(Bool(false), "fill_from_dossier should parse as a committed move")
+            return
+        }
+        #expect(decision.action.kind == .fillFromDossier)
+        #expect(decision.action.submit == true)
+        #expect(decision.action.text == nil, "the model must never supply a value")
+        #expect(decision.action.fields == nil)
+    }
+
+    @Test func aFinishedRunReportsWhatTheDossierDidAndWhatItCost() {
+        var run = AgentRun(
+            id: UUID(), goal: "apply", date: Date(), outcome: .completed,
+            summary: "submitted", steps: []
+        )
+        #expect(run.dossierLine == nil)
+        run.dossierFills = 18
+        run.freeFieldMatches = 21
+        let line = run.dossierLine ?? ""
+        #expect(line.contains("18 fields filled from your dossier"))
+        #expect(line.contains("21 matched free"))
+
+        // Free matching must never appear in the paid tally.
+        run.fastSteps = 2
+        run.preciseSteps = 1
+        #expect(run.totalCalls == 3)
+        #expect(run.callBreakdown?.contains("3 calls") == true)
+    }
+
+    @Test func theMatchingPhaseSaysItIsFreeAndCountsAsThinking() {
+        #expect(AgentPhase.matching.isBusyThinking)
+        #expect(AgentPhase.matching.activityLine.contains("FREE"))
+        #expect(AgentPhase.matching.label == "MATCHING")
+    }
+
+    @Test func aStepCanCarryTheFreeMatchNoteIntoHistory() {
+        var step = AgentStep(
+            index: 3,
+            action: AgentAction(type: AgentActionKind.fillFromDossier.rawValue),
+            reasoning: "the application form",
+            result: "filled 12 of 12",
+            status: .executed,
+            snapshot: nil,
+            pageMap: nil
+        )
+        step.dossierNote = "12 fields matched free"
+        let persisted = PersistedStep(
+            id: step.id,
+            index: step.index,
+            actionType: step.action.kind.rawValue,
+            actionDetail: step.action.detailText,
+            reasoning: step.reasoning,
+            result: step.result,
+            statusRaw: step.status.rawValue,
+            thumbnailFile: nil,
+            dossierNote: step.dossierNote
+        )
+        #expect(persisted.dossierNote == "12 fields matched free")
+        #expect(persisted.kind == .fillFromDossier)
+
+        // Old runs, saved before any of this existed, still decode.
+        let legacy = """
+        {"id":"\(UUID().uuidString)","index":1,"actionType":"tap_element","actionDetail":"[1]","reasoning":"go","statusRaw":"executed"}
+        """
+        let decoded = try? JSONDecoder().decode(PersistedStep.self, from: Data(legacy.utf8))
+        #expect(decoded?.dossierNote == nil)
+    }
+
+    @Test func aFieldDescribesItselfWithoutRevealingItsContents() {
+        let named = probe(7, label: "Email address")
+        #expect(named.descriptor == "[7] \"Email address\"")
+        let unnamed = probe(8, attribute: "field_x")
+        #expect(unnamed.descriptor == "[8] \"field_x\"")
+        let bare = probe(9, widget: .select)
+        #expect(bare.descriptor.contains("dropdown"))
+        #expect(probe(10, label: "City", required: true).requiredDescriptor.contains("(required)"))
+    }
+
+    @Test func onlyTheWidgetsAValueCanBeWrittenIntoAreCountedAsFillable() {
+        #expect(FormFieldProbe.Widget.text.isFillable)
+        #expect(FormFieldProbe.Widget.textarea.isFillable)
+        #expect(FormFieldProbe.Widget.select.isFillable)
+        #expect(!FormFieldProbe.Widget.date.isFillable)
+        #expect(!FormFieldProbe.Widget.checkbox.isFillable)
+        #expect(!FormFieldProbe.Widget.radio.isFillable)
+        #expect(!FormFieldProbe.Widget.other.isFillable)
+    }
+
+    @Test func theProbeScriptRefusesToReadSecretsAndKeepsItsBudget() {
+        let script = FieldScripts.probeScript
+        #expect(script.contains("__rorkAgent"), "probes must use the same numbering the agent sees")
+        #expect(script.contains("secret ? [] : optionsOf"), "a secret field's options are never read")
+        #expect(script.contains("\(FieldScripts.maxFields)"))
+    }
 }

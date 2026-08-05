@@ -7,6 +7,7 @@ struct ContentView: View {
     @State private var showHistory = false
     @State private var showSettings = false
     @State private var showMemory = false
+    @State private var showDossier = false
 
     var body: some View {
         @Bindable var agent = agent
@@ -15,6 +16,7 @@ struct ContentView: View {
 
             VStack(spacing: 0) {
                 TopBar(
+                    onDossier: { presentAuxiliary { showDossier = true } },
                     onMemory: { presentAuxiliary { showMemory = true } },
                     onHistory: { presentAuxiliary { showHistory = true } },
                     onSettings: { presentAuxiliary { showSettings = true } }
@@ -35,6 +37,9 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showMemory) {
             MemoryView()
+        }
+        .sheet(isPresented: $showDossier) {
+            DossierView()
         }
         .onAppear {
             agent.loadHomepageIfNeeded()

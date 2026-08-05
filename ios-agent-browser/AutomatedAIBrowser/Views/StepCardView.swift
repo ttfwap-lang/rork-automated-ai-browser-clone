@@ -149,6 +149,19 @@ struct StepCardView: View {
                     metaRow
                 }
 
+                // The free work made visible: a form fill that resolved most of
+                // itself for nothing should say so on the step it happened on.
+                if let note = step.dossierNote, !note.isEmpty {
+                    HStack(spacing: 4) {
+                        Image(systemName: "bolt.fill")
+                            .font(.system(size: 7, weight: .bold))
+                        Text(note.uppercased())
+                            .techLabel(8)
+                            .lineLimit(2)
+                    }
+                    .foregroundStyle(Theme.green)
+                }
+
                 if let title = step.taskTitle, let number = step.taskNumber, !step.isCheckEntry {
                     HStack(spacing: 4) {
                         Image(systemName: "list.bullet")
@@ -179,8 +192,11 @@ struct StepCardView: View {
                         Image(systemName: "arrow.turn.down.right")
                             .font(.system(size: 8, weight: .bold))
                             .padding(.top, 2)
+                        // A dossier fill's report is several honest lines — what
+                        // landed, what was left blank, what is still the agent's
+                        // job. Truncating that to two lines hides the useful half.
                         Text(result)
-                            .lineLimit(2)
+                            .lineLimit(step.action.kind == .fillFromDossier ? 8 : 2)
                     }
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(Theme.cyan.opacity(0.85))

@@ -111,6 +111,9 @@ struct RunDetailView: View {
         if let mistakes = run.mistakeLine {
             lines.append(mistakes.uppercased())
         }
+        if let dossier = run.dossierLine {
+            lines.append(dossier.uppercased())
+        }
         return lines
     }
 

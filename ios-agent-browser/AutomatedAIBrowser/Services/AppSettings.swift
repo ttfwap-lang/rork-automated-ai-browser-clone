@@ -74,6 +74,12 @@ final class AppSettings {
         didSet { UserDefaults.standard.set(selfHealEnabled, forKey: Keys.selfHeal) }
     }
 
+    /// Offer your own details to forms the agent meets. Off removes the move from
+    /// the agent's tool set entirely — it cannot ask for what it cannot see.
+    var dossierEnabled: Bool {
+        didSet { UserDefaults.standard.set(dossierEnabled, forKey: Keys.dossier) }
+    }
+
     let homepage = "https://duckduckgo.com"
 
     private enum Keys {
@@ -91,6 +97,7 @@ final class AppSettings {
         static let headStart = "settings.headStartEnabled"
         static let lessons = "settings.lessonsEnabled"
         static let selfHeal = "settings.selfHealEnabled"
+        static let dossier = "settings.dossierEnabled"
     }
 
     init() {
@@ -110,5 +117,6 @@ final class AppSettings {
         headStartEnabled = defaults.object(forKey: Keys.headStart) as? Bool ?? true
         lessonsEnabled = defaults.object(forKey: Keys.lessons) as? Bool ?? true
         selfHealEnabled = defaults.object(forKey: Keys.selfHeal) as? Bool ?? true
+        dossierEnabled = defaults.object(forKey: Keys.dossier) as? Bool ?? true
     }
 }

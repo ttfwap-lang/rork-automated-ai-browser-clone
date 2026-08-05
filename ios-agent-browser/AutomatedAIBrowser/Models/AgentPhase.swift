@@ -13,6 +13,8 @@ enum AgentPhase: Equatable {
     case remembering
     /// Running a saved one-tap replay, repairing steps the site has moved.
     case replaying
+    /// Working out what a form is asking for, on the device, for nothing.
+    case matching
 
     var label: String {
         switch self {
@@ -25,6 +27,7 @@ enum AgentPhase: Equatable {
         case .verifying: "VERIFYING"
         case .remembering: "REMEMBERING"
         case .replaying: "REPLAYING"
+        case .matching: "MATCHING"
         }
     }
 
@@ -38,6 +41,7 @@ enum AgentPhase: Equatable {
         case .verifying: Theme.violet
         case .remembering: Theme.cyan
         case .replaying: Theme.amber
+        case .matching: Theme.cyan
         }
     }
 
@@ -50,6 +54,7 @@ enum AgentPhase: Equatable {
         case .verifying: "INDEPENDENT CHECK — LOOKING AT THE PAGE WITH FRESH EYES…"
         case .remembering: "WRITING DOWN THE ROUTE THAT WORKED…"
         case .replaying: "REPLAYING YOUR SAVED ROUTE…"
+        case .matching: "READING THIS FORM AGAINST YOUR DOSSIER — FREE, ON YOUR IPHONE…"
         default: "WORKING…"
         }
     }
@@ -57,7 +62,7 @@ enum AgentPhase: Equatable {
     /// True while the agent is looking or reasoning — drives the scanning border.
     var isBusyThinking: Bool {
         switch self {
-        case .planning, .observing, .thinking, .verifying, .remembering, .replaying: true
+        case .planning, .observing, .thinking, .verifying, .remembering, .replaying, .matching: true
         case .idle, .awaitingApproval, .acting: false
         }
     }

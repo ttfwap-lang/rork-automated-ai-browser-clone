@@ -9,7 +9,9 @@ struct SettingsView: View {
     @Environment(RecipeVault.self) private var vault
     @Environment(LessonBook.self) private var lessonBook
     @Environment(RoutineStore.self) private var routines
+    @Environment(Dossier.self) private var dossier
     @Environment(\.dismiss) private var dismiss
+    @State private var showDossier = false
     @State private var confirmClear = false
     @State private var confirmForget = false
     @State private var confirmForgetLessons = false
@@ -27,6 +29,7 @@ struct SettingsView: View {
                 memorySection
                 lessonsSection
                 replaySection
+                dossierSection
                 judgmentSection
                 modelSection
                 dataSection
@@ -70,6 +73,9 @@ struct SettingsView: View {
                     routines.wipe()
                 }
                 Button("Cancel", role: .cancel) {}
+            }
+            .sheet(isPresented: $showDossier) {
+                DossierView()
             }
             .onAppear {
                 onDevice.refresh()
@@ -232,6 +238,34 @@ struct SettingsView: View {
             Text("One-Tap Replays")
         } footer: {
             Text("After a confirmed success you can save the run as a replay you launch with one tap. Anything you typed becomes a blank it asks for — the value is never stored. When a site moves a control, the step is matched to where it went (free on your iPhone where possible, otherwise one small paid call chosen strictly from elements that really are on the page) and the fix is written back, so the next run is clean. Any step that submits, buys, sends or deletes always stops for a yes. Off makes replays strict: any mismatch hands straight over to the agent. \(routines.isEmpty ? "Nothing saved yet." : "\(routines.routines.count) saved.")")
+        }
+    }
+
+    /// Your own details, and the honest statement of what filling a form from
+    /// them costs: almost nothing.
+    private var dossierSection: some View {
+        @Bindable var settings = settings
+        return Section {
+            Toggle("Fill forms from my details", isOn: $settings.dossierEnabled)
+            Button {
+                showDossier = true
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "person.text.rectangle.fill")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text(dossier.isEmpty ? "Set up your dossier" : "Your dossier — \(dossier.filledCount) details")
+                        .font(.system(size: 15, weight: .semibold))
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(Theme.textSecondary)
+                }
+                .foregroundStyle(Theme.cyan)
+            }
+        } header: {
+            Text("Your Details")
+        } footer: {
+            Text("Fill in your name, contacts, address, work history and the questions long applications ask — once, behind \(DossierGuard.methodName()) — and the agent fills a whole form in one move. Fields are matched for free: most declare what they want in the page's own markup, the rest are read from their labels, and only genuinely odd ones ever reach a paid call. The agent is told which details exist, never what they say, and a field with nothing stored for it is left blank rather than invented. No box exists for a password, a card or a security code, so it can never type one.")
         }
     }
 

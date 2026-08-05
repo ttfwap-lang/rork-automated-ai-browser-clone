@@ -35,6 +35,9 @@ struct AgentStep: Identifiable {
     var wasHealed = false
     /// How the repair was found, in plain words.
     var healNote: String? = nil
+    /// What the free field matching worked out on a dossier fill, e.g. "14 fields
+    /// matched free — 11 the site declared, 3 read from their labels".
+    var dossierNote: String? = nil
     /// How this move's target could be found again on a later visit. Captured at
     /// act time, and never holds anything typed.
     var targetFingerprint: ElementFingerprint? = nil
