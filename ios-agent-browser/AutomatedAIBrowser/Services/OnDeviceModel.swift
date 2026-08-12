@@ -1,23 +1,32 @@
 import Foundation
-import Observation
-
-#if canImport(FoundationModels)
 import FoundationModels
-#endif
+import Observation
 
 /// This iPhone's own free, private AI — Apple's on-device foundation model.
 ///
-/// Everything here is deliberately defensive. The framework only exists on
-/// iOS 26 and later, the model only exists on some devices, it can be switched
-/// off mid-run, and it can refuse a request outright. No entry point throws into
-/// the run loop: callers get an honest answer or an honest refusal and fall back
-/// to the cloud.
+/// The app's minimum is iOS 26, so the framework is always present and imported
+/// plainly. What is still not guaranteed is the *model*: it exists only on some
+/// devices, Apple Intelligence can be switched off mid-run, and the model can
+/// refuse a request outright. So availability is re-read constantly and no entry
+/// point throws into the run loop — callers get an honest answer or an honest
+/// refusal and fall back to the cloud.
+///
+/// Two ways to ask:
+/// - `ask(instructions:prompt:)` returns prose, for jobs whose answer is prose.
+/// - `ask(instructions:prompt:generating:)` returns a real Swift value via guided
+///   generation. The framework constrains sampling to the shape of the type, so a
+///   malformed answer is not a case that has to be handled — it cannot be
+///   produced. Every job with a structured answer uses this one.
 @Observable
 final class OnDeviceModel {
-    /// Longest a free answer may take before the cloud takes the step over. The
-    /// on-device model is small, and a slow answer costs the user the very time
-    /// it was supposed to save.
+    /// Longest a free prose answer may take before the cloud takes the step over.
+    /// The on-device model is small, and a slow answer costs the user the very
+    /// time it was supposed to save.
     static let timeout: Duration = .seconds(6)
+
+    /// Guided generation has to satisfy a schema as well as answer, so it gets a
+    /// slightly longer leash before the cloud takes over.
+    static let guidedTimeout: Duration = .seconds(9)
 
     private(set) var state: OnDeviceState
 
@@ -25,7 +34,7 @@ final class OnDeviceModel {
     /// at once is a runtime error rather than a recoverable one.
     private var isBusy = false
     /// Holds the warmed-up session so the first answer of a run is instant.
-    private var warmSession: Any?
+    private var warmSession: LanguageModelSession?
 
     init() {
         state = Self.currentState()
@@ -48,13 +57,9 @@ final class OnDeviceModel {
             warmSession = nil
             return
         }
-        #if canImport(FoundationModels)
-        if #available(iOS 26.0, *) {
-            let session = LanguageModelSession()
-            session.prewarm()
-            warmSession = session
-        }
-        #endif
+        let session = LanguageModelSession()
+        session.prewarm()
+        warmSession = session
     }
 
     /// Releases the warmed model at the end of a run.
@@ -62,55 +67,98 @@ final class OnDeviceModel {
         warmSession = nil
     }
 
-    /// Asks for one short answer, one request at a time. Never throws.
+    // MARK: - Prose
+
+    /// Asks for one short prose answer, one request at a time. Never throws.
     func ask(instructions: String, prompt: String) async -> OnDeviceAnswer {
         refresh()
         guard state.isReady else { return .unavailable(state) }
         guard !isBusy else { return .failed("your iPhone's model was already busy") }
+        isBusy = true
+        defer { isBusy = false }
 
-        #if canImport(FoundationModels)
-        if #available(iOS 26.0, *) {
-            isBusy = true
-            defer { isBusy = false }
-            return await respond(instructions: instructions, prompt: prompt)
-        }
-        return .unavailable(.notEligible)
-        #else
-        return .unavailable(.notEligible)
-        #endif
-    }
-
-    // MARK: - The framework, walled off behind availability
-
-    #if canImport(FoundationModels)
-    @available(iOS 26.0, *)
-    private func respond(instructions: String, prompt: String) async -> OnDeviceAnswer {
         // A fresh session per ask: our requests are one-shot and independent, so
         // a shared transcript would only leak stale context and eat the window.
         let session = LanguageModelSession(instructions: instructions)
         let work = Task { try await session.respond(to: prompt).content }
+
+        switch await Self.race(work, budget: Self.timeout) {
+        case .success(let answer):
+            let text = answer.trimmed
+            return text.isEmpty ? .failed("your iPhone's model returned nothing") : .answered(text)
+        case .timedOut:
+            return .timedOut
+        case .failure(let error):
+            return Self.classify(error)
+        }
+    }
+
+    // MARK: - Guided generation
+
+    /// Asks for a real Swift value rather than text to parse.
+    ///
+    /// The framework constrains what the model may emit to the shape of `Value`,
+    /// so there is no malformed-output path to defend against and no string
+    /// parsing to get wrong. Where `Value` contains an enumeration, the model
+    /// physically cannot name a case that does not exist.
+    func ask<Value>(
+        instructions: String,
+        prompt: String,
+        generating type: Value.Type
+    ) async -> OnDeviceTyped<Value> where Value: Generable & Sendable {
+        refresh()
+        guard state.isReady else { return .declined(.unavailable(state)) }
+        guard !isBusy else { return .declined(.failed("your iPhone's model was already busy")) }
+        isBusy = true
+        defer { isBusy = false }
+
+        let session = LanguageModelSession(instructions: instructions)
+        let work = Task { try await session.respond(to: prompt, generating: type).content }
+
+        switch await Self.race(work, budget: Self.guidedTimeout) {
+        case .success(let value):
+            return .answered(value)
+        case .timedOut:
+            return .declined(.timedOut)
+        case .failure(let error):
+            return .declined(Self.classify(error))
+        }
+    }
+
+    // MARK: - Racing a request against its budget
+
+    private enum Race<Value> {
+        case success(Value)
+        case timedOut
+        case failure(Error)
+    }
+
+    /// Runs `work` against a wall-clock budget, cancelling it if the budget goes.
+    /// Kept in one place so prose and guided asks time out identically.
+    private static func race<Value>(
+        _ work: Task<Value, Error>,
+        budget: Duration
+    ) async -> Race<Value> where Value: Sendable {
         let watchdog = Task {
-            try? await Task.sleep(for: Self.timeout)
+            try? await Task.sleep(for: budget)
             work.cancel()
         }
         defer { watchdog.cancel() }
 
         do {
-            let answer = try await work.value.trimmed
-            return answer.isEmpty ? .failed("your iPhone's model returned nothing") : .answered(answer)
+            return .success(try await work.value)
         } catch is CancellationError {
             return .timedOut
         } catch {
-            return Self.classify(error)
+            return .failure(error)
         }
     }
-    #endif
+
+    // MARK: - Availability
 
     /// Reads availability, collapsing the framework's reasons into our four
     /// honest states.
     static func currentState() -> OnDeviceState {
-        #if canImport(FoundationModels)
-        guard #available(iOS 26.0, *) else { return .notEligible }
         switch SystemLanguageModel.default.availability {
         case .available:
             return .ready
@@ -124,9 +172,6 @@ final class OnDeviceModel {
         @unknown default:
             return .unavailable
         }
-        #else
-        return .notEligible
-        #endif
     }
 
     /// Sorts a framework error into an outcome the run loop can act on.

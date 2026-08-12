@@ -1,23 +1,88 @@
 import Foundation
+import FoundationModels
 
 /// The third free pass: your iPhone reads the labels the phrase table could not
 /// place.
 ///
-/// This is deliberately the smallest possible question — a list of labels, a list
-/// of fact names, one line back per field — because a small model is reliable at
-/// "12=city" and unreliable at anything nested. Anything it says is checked
-/// against the fields that really exist and the facts that really are on the
-/// list; a line that fails either check is dropped and the field stays unmatched.
-/// A dropped line costs nothing, so being strict is free.
+/// This asks for a real Swift value rather than text. Guided generation
+/// constrains sampling to `Reading`, whose `fact` is a `DossierFieldKind` — so an
+/// invented fact name is not an error case that has to be caught, it is an answer
+/// the model is incapable of producing. Because there is no case for a password,
+/// a card or a security code, it also cannot ask for one. The old defence was a
+/// whitelist applied after parsing; this one is enforced while the answer is
+/// being sampled.
+///
+/// It still cannot be trusted about *which* field: a number it returns is checked
+/// against the fields actually asked about, and an unknown number is dropped. A
+/// dropped reading costs nothing, so being strict is free.
 nonisolated enum OnDeviceFieldReader {
 
-    /// Labels sent in one ask. Past this, a small model starts skipping lines.
+    /// Labels sent in one ask. Past this, a small model starts skipping entries.
     static let batchSize = 12
 
     /// The most it is worth asking about in a single form. Beyond this the field
     /// is genuinely unusual and belongs to the agent.
     static let maxFields = 24
 
+    /// One label the model recognised.
+    @Generable(description: "One numbered form label matched to the detail it asks for")
+    struct Reading: Equatable, Sendable {
+        @Guide(description: "The number printed before the label")
+        var field: Int
+
+        @Guide(description: "Which personal detail that label is asking for")
+        var fact: DossierFieldKind
+    }
+
+    /// Everything the model recognised in one batch.
+    @Generable(description: "The labels you recognised")
+    struct Sheet: Equatable, Sendable {
+        @Guide(description: "One entry for each numbered label you are confident about. Omit a label entirely when unsure.")
+        var readings: [Reading]
+    }
+
+    /// Instructions for the guided ask. Note there is no "answer none" rule to
+    /// obey — omission *is* the refusal, and the shape of the answer enforces it.
+    static let guidedInstructions = """
+    You match numbered form field labels from one web form to the kind of personal detail each label is asking for.
+
+    Rules:
+    - Only include a label when you are genuinely confident. Omitting a label is always a safe answer.
+    - Never include a label that asks for a password, a card number or a security code.
+    - Only use numbers that appear in the list you are given.
+    """
+
+    /// The guided ask. Labels only — no page text, no values, nothing from the
+    /// dossier at all, not even the names of the facts: the schema carries those.
+    static func guidedPrompt(for probes: [FormFieldProbe]) -> String {
+        var lines = ["LABELS:"]
+        for probe in probes {
+            let words = probe.label.isEmpty ? probe.attribute : probe.label
+            lines.append("\(probe.id)=\(String(words.prefix(60)))")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    /// Turns a guided answer into matches, keeping only fields that were actually
+    /// asked about and only the first reading for each.
+    ///
+    /// The fact needs no checking: it arrived as a real case of the enumeration.
+    static func resolve(_ sheet: Sheet, asking probes: [FormFieldProbe]) -> [FieldMatch] {
+        let byID = Dictionary(uniqueKeysWithValues: probes.map { ($0.id, $0) })
+        var matches: [FieldMatch] = []
+        var claimed = Set<Int>()
+
+        for reading in sheet.readings {
+            guard let probe = byID[reading.field], !claimed.contains(reading.field) else { continue }
+            claimed.insert(reading.field)
+            matches.append(FieldMatch(probe: probe, kind: reading.fact, source: .meaning))
+        }
+
+        return matches
+    }
+
+    /// Kept for the fallback path: if guided generation cannot run at all, a plain
+    /// prose ask is still better than leaving every odd field to a paid call.
     static let instructions = """
     You match form field labels to a fixed list of personal-detail names. You are given numbered labels from one web form.
 

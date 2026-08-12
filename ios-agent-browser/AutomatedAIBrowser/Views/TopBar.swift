@@ -22,16 +22,23 @@ struct TopBar: View {
                     .foregroundStyle(Theme.textPrimary)
             }
             Spacer()
-            // Badged when your details are ready to be used, so the one piece of
-            // setup that unlocks form filling is never invisible.
-            headerButton(
-                dossier.canHelpWithForms ? "person.text.rectangle.fill" : "person.text.rectangle",
-                tint: dossier.canHelpWithForms ? Theme.cyan.opacity(0.9) : Theme.textSecondary,
-                action: onDossier
-            )
-            headerButton("brain", action: onMemory)
-            headerButton("clock.arrow.circlepath", action: onHistory)
-            headerButton("gearshape.fill", action: onSettings)
+
+            // One glass container, so the four entry points read as a single
+            // control cluster and merge fluidly instead of four separate pills.
+            GlassEffectContainer(spacing: 4) {
+                HStack(spacing: 4) {
+                    // Badged when your details are ready to be used, so the one
+                    // piece of setup that unlocks form filling is never invisible.
+                    headerButton(
+                        dossier.canHelpWithForms ? "person.text.rectangle.fill" : "person.text.rectangle",
+                        tint: dossier.canHelpWithForms ? Theme.cyan : nil,
+                        action: onDossier
+                    )
+                    headerButton("brain", action: onMemory)
+                    headerButton("clock.arrow.circlepath", action: onHistory)
+                    headerButton("gearshape.fill", action: onSettings)
+                }
+            }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 6)
@@ -39,16 +46,17 @@ struct TopBar: View {
 
     private func headerButton(
         _ systemName: String,
-        tint: Color = Theme.textSecondary,
+        tint: Color? = nil,
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
             Image(systemName: systemName)
                 .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(tint)
+                .foregroundStyle(tint == nil ? Theme.textSecondary : Color.black)
                 .frame(width: 44, height: 44)
                 .contentShape(Rectangle())
         }
         .buttonStyle(PressableButtonStyle())
+        .controlGlass(.circle, tint: tint)
     }
 }

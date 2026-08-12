@@ -86,7 +86,7 @@ struct StatusStrip: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 9)
-        .background(Theme.surface.opacity(0.7))
+        .hudGlass(.rect)
         .overlay(alignment: .top) {
             Rectangle().fill(Theme.line).frame(height: 1)
         }

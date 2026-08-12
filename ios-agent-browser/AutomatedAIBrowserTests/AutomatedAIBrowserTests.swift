@@ -3116,4 +3116,59 @@ struct AutomatedAIBrowserTests {
         #expect(script.contains("secret ? [] : optionsOf"), "a secret field's options are never read")
         #expect(script.contains("\(FieldScripts.maxFields)"))
     }
+
+    // MARK: - Guided generation — the free tier stops parsing strings
+
+    @Test func theGuidedReaderIgnoresAFieldItNeverAskedAbout() {
+        let asked = [probe(4, label: "Where did you study"), probe(5, label: "Your postcode")]
+        let sheet = OnDeviceFieldReader.Sheet(readings: [
+            OnDeviceFieldReader.Reading(field: 4, fact: .school),
+            OnDeviceFieldReader.Reading(field: 99, fact: .email),
+            OnDeviceFieldReader.Reading(field: 4, fact: .city),
+        ])
+        let matches = OnDeviceFieldReader.resolve(sheet, asking: asked)
+
+        #expect(matches.count == 1, "an unknown number is dropped, and only the first reading of a field counts")
+        #expect(matches.first?.id == 4)
+        #expect(matches.first?.kind == .school)
+        #expect(matches.first?.source == .meaning)
+    }
+
+    @Test func anEmptyGuidedSheetIsARefusalRatherThanAGuess() {
+        let matches = OnDeviceFieldReader.resolve(
+            OnDeviceFieldReader.Sheet(readings: []),
+            asking: [probe(4, label: "Question 4")]
+        )
+        #expect(matches.isEmpty, "omitting a label is how the model says it doesn't know")
+    }
+
+    @Test func theGuidedPromptCarriesLabelsOnlyBecauseTheSchemaCarriesTheFactNames() {
+        let prompt = OnDeviceFieldReader.guidedPrompt(for: [probe(4, label: "Where did you study")])
+        #expect(prompt.contains("4=Where did you study"))
+        #expect(!prompt.contains("ALLOWED NAMES"), "the allowed names are the schema now, not prose")
+        #expect(!prompt.contains("school"))
+    }
+
+    @Test func aDeclinedGuidedAskExplainsItselfAndYieldsNothing() {
+        let declined = OnDeviceTyped<OnDeviceFieldReader.Sheet>.declined(.timedOut)
+        #expect(declined.value == nil)
+        #expect(declined.handoffNote == "your iPhone's model took too long")
+
+        let answered = OnDeviceTyped.answered(OnDeviceFieldReader.Sheet(readings: []))
+        #expect(answered.value != nil)
+        #expect(answered.handoffNote == nil, "a real answer has nothing to hand off")
+    }
+
+    @Test func satisfyingASchemaEarnsALongerLeashThanPlainProse() {
+        #expect(OnDeviceModel.guidedTimeout > OnDeviceModel.timeout)
+    }
+
+    @Test func everyFactNameIsSchemaSafe() {
+        // The schema the model is constrained to is built from these cases, so an
+        // unnamed or inconsistently cased case would be an ambiguous choice.
+        for kind in DossierFieldKind.allCases {
+            #expect(!kind.briefingName.isEmpty)
+            #expect(kind.briefingName == kind.briefingName.lowercased())
+        }
+    }
 }

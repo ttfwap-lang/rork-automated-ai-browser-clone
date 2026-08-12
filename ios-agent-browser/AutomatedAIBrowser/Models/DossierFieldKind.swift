@@ -1,4 +1,5 @@
 import Foundation
+import FoundationModels
 
 /// One kind of fact the dossier can hold.
 ///
@@ -7,6 +8,13 @@ import Foundation
 /// security number. The dossier physically cannot hold one, so no amount of
 /// clever page markup can talk the agent into typing one — the guarantee holds
 /// by construction rather than by policy.
+///
+/// `@Generable` extends that same guarantee to the model on your iPhone. When it
+/// is asked which fact a strange form label wants, guided generation constrains
+/// it to these cases, so it cannot invent a fact name and cannot name a secret —
+/// there is no case for one. The old defence was a whitelist applied after the
+/// fact; this one is enforced while the answer is being sampled.
+@Generable(description: "A kind of personal detail that a form field can ask for")
 nonisolated enum DossierFieldKind: String, CaseIterable, Identifiable, Codable, Sendable {
     // Who you are
     case fullName

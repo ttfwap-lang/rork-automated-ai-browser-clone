@@ -31,7 +31,7 @@ struct CommandBar: View {
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 12)
-                .background(Theme.surface, in: RoundedRectangle(cornerRadius: 16))
+                .hudGlass(.rect(cornerRadius: 16))
                 .overlay(
                     RoundedRectangle(cornerRadius: 16)
                         .strokeBorder(goalFocused ? Theme.cyan.opacity(0.5) : Theme.line, lineWidth: 1)
@@ -63,10 +63,9 @@ struct CommandBar: View {
                     .foregroundStyle(Theme.textSecondary)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 9)
-                    .background(Theme.surface, in: Capsule())
-                    .overlay(Capsule().strokeBorder(Theme.line, lineWidth: 1))
                 }
                 .buttonStyle(PressableButtonStyle())
+                .controlGlass(.capsule)
             }
         }
         .padding(.horizontal, 16)
@@ -88,17 +87,15 @@ struct CommandBar: View {
                 .font(.system(size: 17, weight: .bold))
                 .foregroundStyle(agent.isRunning ? Theme.red : Color.black)
                 .frame(width: 52, height: 46)
-                .background(
-                    RoundedRectangle(cornerRadius: 16)
-                        .fill(agent.isRunning ? Theme.red.opacity(0.15) : Theme.cyan)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 16)
-                        .strokeBorder(agent.isRunning ? Theme.red.opacity(0.6) : Color.clear, lineWidth: 1)
-                )
                 .shadow(color: agent.isRunning ? .clear : Theme.cyan.opacity(0.45), radius: 10, y: 2)
         }
         .buttonStyle(PressableButtonStyle())
+        // The one tinted control in the cockpit: the thing that starts and stops
+        // the agent. Everything else stays untinted so this reads as primary.
+        .controlGlass(
+            .rect(cornerRadius: 16),
+            tint: agent.isRunning ? Theme.red : Theme.cyan
+        )
         .disabled(!agent.isRunning && agent.goalText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         .opacity(!agent.isRunning && agent.goalText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0.4 : 1)
     }

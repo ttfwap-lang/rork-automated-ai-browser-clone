@@ -1945,6 +1945,21 @@ final class AgentViewModel {
         var found: [FieldMatch] = []
         for batch in OnDeviceFieldReader.batches(leftovers) {
             guard !Task.isCancelled else { break }
+
+            // Guided generation: the answer arrives as real fact kinds, so it is
+            // structurally incapable of naming a fact that doesn't exist.
+            let typed = await onDevice.ask(
+                instructions: OnDeviceFieldReader.guidedInstructions,
+                prompt: OnDeviceFieldReader.guidedPrompt(for: batch),
+                generating: OnDeviceFieldReader.Sheet.self
+            )
+            if let sheet = typed.value {
+                found.append(contentsOf: OnDeviceFieldReader.resolve(sheet, asking: batch))
+                continue
+            }
+
+            // Guided generation could not run. A prose ask is still free, and
+            // still cheaper than handing every odd field to a paid call.
             let answer = await onDevice.ask(
                 instructions: OnDeviceFieldReader.instructions,
                 prompt: OnDeviceFieldReader.prompt(for: batch)
