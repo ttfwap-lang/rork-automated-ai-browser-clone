@@ -19,7 +19,9 @@ extension View {
     /// Tinted toward the app's own charcoal so cyan telemetry text keeps its
     /// contrast over a bright web page instead of washing out.
     func hudGlass<S: Shape>(_ shape: S) -> some View {
-        glassEffect(.regular.tint(Theme.bg.opacity(0.5)), in: shape)
+        // A deeper charcoal scrim: over a bright white page the light cockpit
+        // text keeps its contrast instead of washing out in the refraction.
+        glassEffect(.regular.tint(Theme.bg.opacity(0.66)), in: shape)
     }
 
     /// An interactive control that responds to touch.

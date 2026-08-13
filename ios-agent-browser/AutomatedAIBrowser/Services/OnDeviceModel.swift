@@ -80,16 +80,18 @@ final class OnDeviceModel {
         // A fresh session per ask: our requests are one-shot and independent, so
         // a shared transcript would only leak stale context and eat the window.
         let session = LanguageModelSession(instructions: instructions)
-        let work = Task { try await session.respond(to: prompt).content }
 
-        switch await Self.race(work, budget: Self.timeout) {
+        switch await Self.race(
+            perform: { try await session.respond(to: prompt).content },
+            budget: Self.timeout
+        ) {
         case .success(let answer):
             let text = answer.trimmed
             return text.isEmpty ? .failed("your iPhone's model returned nothing") : .answered(text)
         case .timedOut:
             return .timedOut
-        case .failure(let error):
-            return Self.classify(error)
+        case .failure(let description):
+            return Self.classify(description)
         }
     }
 
@@ -113,45 +115,62 @@ final class OnDeviceModel {
         defer { isBusy = false }
 
         let session = LanguageModelSession(instructions: instructions)
-        let work = Task { try await session.respond(to: prompt, generating: type).content }
 
-        switch await Self.race(work, budget: Self.guidedTimeout) {
+        switch await Self.race(
+            perform: { try await session.respond(to: prompt, generating: type).content },
+            budget: Self.guidedTimeout
+        ) {
         case .success(let value):
             return .answered(value)
         case .timedOut:
             return .declined(.timedOut)
-        case .failure(let error):
-            return .declined(Self.classify(error))
+        case .failure(let description):
+            return .declined(Self.classify(description))
         }
     }
 
     // MARK: - Racing a request against its budget
 
-    private enum Race<Value> {
+    enum Race<Value: Sendable> {
         case success(Value)
         case timedOut
-        case failure(Error)
+        /// The failure's description. Kept as a string so the result can cross
+        /// concurrency domains safely — the error itself is classified later.
+        case failure(String)
     }
 
-    /// Runs `work` against a wall-clock budget, cancelling it if the budget goes.
-    /// Kept in one place so prose and guided asks time out identically.
-    private static func race<Value>(
-        _ work: Task<Value, Error>,
+    /// Runs `work` against a hard wall-clock budget.
+    ///
+    /// "Hard" means the loser is abandoned rather than merely asked to stop:
+    /// whichever contender finishes first wins, and the caller never waits on
+    /// the other one. A model that ignores cancellation can therefore slow a
+    /// step down by at most `budget`.
+    static func race<Value: Sendable>(
+        perform work: @escaping @Sendable () async throws -> Value,
         budget: Duration
-    ) async -> Race<Value> where Value: Sendable {
+    ) async -> Race<Value> {
+        let (stream, continuation) = AsyncStream.makeStream(of: Race<Value>.self)
+
+        let job = Task {
+            let outcome: Race<Value>
+            do { outcome = .success(try await work()) }
+            catch is CancellationError { outcome = .timedOut }
+            catch { outcome = .failure(String(describing: error)) }
+            continuation.yield(outcome)
+            continuation.finish()
+        }
         let watchdog = Task {
             try? await Task.sleep(for: budget)
-            work.cancel()
+            job.cancel()
+            continuation.yield(.timedOut)
+            continuation.finish()
         }
-        defer { watchdog.cancel() }
+        defer {
+            job.cancel()
+            watchdog.cancel()
+        }
 
-        do {
-            return .success(try await work.value)
-        } catch is CancellationError {
-            return .timedOut
-        } catch {
-            return .failure(error)
-        }
+        return await stream.first { _ in true } ?? .timedOut
     }
 
     // MARK: - Availability
@@ -174,14 +193,15 @@ final class OnDeviceModel {
         }
     }
 
-    /// Sorts a framework error into an outcome the run loop can act on.
+    /// Sorts a framework failure's description into an outcome the run loop can
+    /// act on.
     ///
-    /// Deliberately matched on the error's description rather than on concrete
-    /// case names: the exact cases have shifted between iOS releases, and a
-    /// missing case name here would be a build failure on a feature whose whole
-    /// promise is that it degrades quietly.
-    nonisolated static func classify(_ error: Error) -> OnDeviceAnswer {
-        let text = String(describing: error).lowercased()
+    /// Deliberately matched on the description rather than on concrete case
+    /// names: the exact cases have shifted between iOS releases, and a missing
+    /// case name here would be a build failure on a feature whose whole promise
+    /// is that it degrades quietly.
+    nonisolated static func classify(_ description: String) -> OnDeviceAnswer {
+        let text = description.lowercased()
         if text.contains("guardrail") || text.contains("safety") || text.contains("unsafe") {
             return .refused("your iPhone's model declined this one on safety grounds")
         }

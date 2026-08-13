@@ -1204,16 +1204,16 @@ struct AutomatedAIBrowserTests {
     }
 
     @Test func aSafetyRefusalIsTreatedAsAHesitationNotAFailure() {
-        let refusal = OnDeviceModel.classify(NSError(domain: "guardrailViolation", code: 1))
+        let refusal = OnDeviceModel.classify("guardrailViolation")
         #expect(refusal == .refused("your iPhone's model declined this one on safety grounds"))
 
-        let tooLong = OnDeviceModel.classify(NSError(domain: "exceededContextWindowSize", code: 2))
+        let tooLong = OnDeviceModel.classify("exceededContextWindowSize")
         #expect(tooLong == .failed("the request was too long for your iPhone's model"))
 
-        let downloading = OnDeviceModel.classify(NSError(domain: "modelNotReady", code: 3))
+        let downloading = OnDeviceModel.classify("modelNotReady")
         #expect(downloading == .unavailable(.downloading))
 
-        let unknown = OnDeviceModel.classify(NSError(domain: "somethingElse", code: 4))
+        let unknown = OnDeviceModel.classify("somethingElse")
         #expect(unknown == .failed("your iPhone's model couldn't answer"))
     }
 
@@ -3170,5 +3170,79 @@ struct AutomatedAIBrowserTests {
             #expect(!kind.briefingName.isEmpty)
             #expect(kind.briefingName == kind.briefingName.lowercased())
         }
+    }
+
+    // MARK: - The free tier's budget is a hard stop
+
+    @Test func aFastFreeCallWinsBeforeItsBudget() async {
+        let outcome = await OnDeviceModel.race(perform: { 42 }, budget: .seconds(10))
+        guard case .success(let value) = outcome else {
+            Issue.record("an instant answer must win the race")
+            return
+        }
+        #expect(value == 42)
+    }
+
+    @Test func aFreeCallThatIgnoresCancellationStillCannotDelayTheRun() async {
+        let start = Date()
+        let outcome = await OnDeviceModel.race(
+            perform: {
+                // Simulates a model that ignores cancellation entirely: it waits
+                // on a detached task that is never cancelled, so it can never
+                // finish on its own.
+                try await Task.detached(priority: .background) {
+                    while true { Thread.sleep(forTimeInterval: 0.1) }
+                }.value
+            },
+            budget: .milliseconds(150)
+        )
+        let elapsed = Date().timeIntervalSince(start)
+        guard case .timedOut = outcome else {
+            Issue.record("a call that ignores cancellation must be abandoned, not awaited")
+            return
+        }
+        #expect(elapsed < 1.0)
+    }
+
+    // MARK: - The step card says which free path ran
+
+    @Test func theReaderNoteIsSilentWhenNoBatchWasAsked() {
+        let note = OnDeviceFieldReader.outcomeNote(
+            asked: false, guidedDeclined: nil, proseUsed: false, matched: 0, left: 0
+        )
+        #expect(note == nil)
+    }
+
+    @Test func theReaderNoteNamesTheGuidedPathWhenItSucceeds() {
+        let note = OnDeviceFieldReader.outcomeNote(
+            asked: true, guidedDeclined: nil, proseUsed: false, matched: 3, left: 2
+        )
+        #expect(note?.contains("your iPhone read 3 of the leftover labels by meaning") == true)
+        #expect(note?.contains("2 labels still the agent's") == true)
+    }
+
+    @Test func theReaderNoteNamesTheFallbackWhenGuidedReadingCouldNotRun() {
+        let note = OnDeviceFieldReader.outcomeNote(
+            asked: true,
+            guidedDeclined: "your iPhone's model took too long",
+            proseUsed: true,
+            matched: 2,
+            left: 3
+        )
+        #expect(note?.contains("older text reader matched 2 labels") == true)
+        #expect(note?.contains("took too long") == true)
+        #expect(note?.contains("3 labels still the agent's") == true)
+    }
+
+    @Test func theReaderNoteSaysSoWhenBothReadersComeUpEmpty() {
+        let note = OnDeviceFieldReader.outcomeNote(
+            asked: true,
+            guidedDeclined: "your iPhone's model declined this one on safety grounds",
+            proseUsed: true,
+            matched: 0,
+            left: 5
+        )
+        #expect(note?.contains("couldn't read the leftover labels") == true)
+        #expect(note?.contains("5 labels are the agent's") == true)
     }
 }

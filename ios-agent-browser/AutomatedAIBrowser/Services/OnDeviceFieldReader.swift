@@ -63,6 +63,39 @@ nonisolated enum OnDeviceFieldReader {
         return lines.joined(separator: "\n")
     }
 
+    /// The honest one-liner for the fill step card, built from how the batches
+    /// went. nil when nothing was asked at all — no reader, no claim.
+    ///
+    /// `guidedDeclined` is why the guided ask declined (the last one, when
+    /// several batches were read); `proseUsed` is true when the older text
+    /// reader took over for at least one batch; `matched` counts the labels
+    /// placed and `left` the ones still the agent's to handle.
+    static func outcomeNote(
+        asked: Bool,
+        guidedDeclined: String?,
+        proseUsed: Bool,
+        matched: Int,
+        left: Int
+    ) -> String? {
+        guard asked else { return nil }
+        let leftWords = "\(left) label\(left == 1 ? "" : "s")"
+        let why = guidedDeclined.map { " (\($0))" } ?? ""
+
+        if matched > 0, !proseUsed {
+            return "your iPhone read \(matched) of the leftover labels by meaning; \(leftWords) still the agent's — free"
+        }
+        if matched > 0 {
+            return "your iPhone's guided reader couldn't run\(why), so the older text reader matched \(matched) label\(matched == 1 ? "" : "s"); \(leftWords) still the agent's — free"
+        }
+        if proseUsed {
+            return "your iPhone couldn't read the leftover labels\(why); \(leftWords) are the agent's to handle — free"
+        }
+        if guidedDeclined != nil {
+            return "your iPhone's guided reader declined\(why); \(leftWords) are the agent's to handle"
+        }
+        return "your iPhone recognised none of the leftover labels; \(leftWords) are the agent's to handle"
+    }
+
     /// Turns a guided answer into matches, keeping only fields that were actually
     /// asked about and only the first reading for each.
     ///

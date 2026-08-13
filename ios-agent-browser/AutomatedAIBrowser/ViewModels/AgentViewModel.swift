@@ -1869,8 +1869,9 @@ final class AgentViewModel {
     ///
     /// Every stage of the matching is free: the page's own declared purposes, the
     /// phrase table, and — only for what is left — this iPhone's model. None of it
-    /// touches the paid tally, and the values go straight from the dossier into
-    /// the page without passing through a prompt.
+    /// touches the paid tally; batches that actually place a label count as free
+    /// calls, and the values go straight from the dossier into the page without
+    /// passing through a prompt.
     private func performDossierFill(submit: Bool) async -> String {
         guard settings.dossierEnabled else {
             return "filling from your details is switched off in Settings — type the fields yourself, or ask the person to turn it on"
@@ -1889,14 +1890,17 @@ final class AgentViewModel {
         var (matches, leftovers) = FieldMatcher.match(probes)
 
         // Pass 3: only the genuine oddities, and only when this iPhone can read
-        // them. A failure here costs nothing and simply leaves them unmatched.
+        // them. A refusal here costs nothing, is said honestly on the step card,
+        // and simply leaves the fields unmatched.
+        var readNote: String?
         if !leftovers.isEmpty, isFreeTierReady {
             let read = await readLeftovers(leftovers)
-            if !read.isEmpty {
-                let placed = Set(read.map(\.id))
-                matches = FieldMatcher.dedupe(matches + read)
+            if !read.matches.isEmpty {
+                let placed = Set(read.matches.map(\.id))
+                matches = FieldMatcher.dedupe(matches + read.matches)
                 leftovers = leftovers.filter { !placed.contains($0.id) }
             }
+            readNote = read.note
         }
 
         let plan = FieldMatcher.plan(
@@ -1905,7 +1909,7 @@ final class AgentViewModel {
             available: dossier.filledKinds
         )
         freeFieldMatchCount += plan.freeMatchCount
-        pendingDossierNote = plan.freeLine
+        pendingDossierNote = [plan.freeLine, readNote].compactMap { $0 }.joined(separator: " ")
 
         guard !plan.ready.isEmpty else {
             phase = .acting
@@ -1939,35 +1943,59 @@ final class AgentViewModel {
     }
 
     /// Asks this iPhone to read the labels the phrase table couldn't place.
-    /// Strictly checked, and silently skipped on any refusal — an unmatched field
-    /// is handed back to the agent by name, which is honest and costs nothing.
-    private func readLeftovers(_ leftovers: [FormFieldProbe]) async -> [FieldMatch] {
+    /// Strictly checked, and honestly reported when it declines — an unmatched
+    /// field is handed back to the agent by name, which is free.
+    ///
+    /// Returns the matches and the one-liner for the step card, so every path
+    /// the free tier takes (guided, fallback, or nothing at all) shows up in the
+    /// mission log instead of being silently skipped.
+    private func readLeftovers(_ leftovers: [FormFieldProbe]) async -> (matches: [FieldMatch], note: String?) {
         var found: [FieldMatch] = []
+        var asked = false
+        var proseUsed = false
+        var guidedDeclined: String?
+
         for batch in OnDeviceFieldReader.batches(leftovers) {
             guard !Task.isCancelled else { break }
 
             // Guided generation: the answer arrives as real fact kinds, so it is
             // structurally incapable of naming a fact that doesn't exist.
+            asked = true
             let typed = await onDevice.ask(
                 instructions: OnDeviceFieldReader.guidedInstructions,
                 prompt: OnDeviceFieldReader.guidedPrompt(for: batch),
                 generating: OnDeviceFieldReader.Sheet.self
             )
             if let sheet = typed.value {
-                found.append(contentsOf: OnDeviceFieldReader.resolve(sheet, asking: batch))
+                let matched = OnDeviceFieldReader.resolve(sheet, asking: batch)
+                if !matched.isEmpty { freeCallCount += 1 }
+                found.append(contentsOf: matched)
                 continue
             }
+            guidedDeclined = typed.handoffNote
 
-            // Guided generation could not run. A prose ask is still free, and
-            // still cheaper than handing every odd field to a paid call.
+            // Guided generation could not run. A prose ask is still free, still
+            // cheaper than handing every odd field to a paid call — and the step
+            // card says this fallback ran.
+            proseUsed = true
             let answer = await onDevice.ask(
                 instructions: OnDeviceFieldReader.instructions,
                 prompt: OnDeviceFieldReader.prompt(for: batch)
             )
             guard let text = answer.text else { continue }
-            found.append(contentsOf: OnDeviceFieldReader.parse(text, asking: batch))
+            let matched = OnDeviceFieldReader.parse(text, asking: batch)
+            if !matched.isEmpty { freeCallCount += 1 }
+            found.append(contentsOf: matched)
         }
-        return found
+
+        let note = OnDeviceFieldReader.outcomeNote(
+            asked: asked,
+            guidedDeclined: guidedDeclined,
+            proseUsed: proseUsed,
+            matched: found.count,
+            left: leftovers.count - found.count
+        )
+        return (found, note)
     }
 
     // MARK: - Memory ceiling
