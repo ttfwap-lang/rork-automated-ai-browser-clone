@@ -32,3 +32,5 @@ Package.resolved
 .rork/
 .env
 Config.swift
+
+.vscode/

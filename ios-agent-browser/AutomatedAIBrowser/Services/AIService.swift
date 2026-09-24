@@ -642,7 +642,8 @@ nonisolated struct AIService {
         parts: [ChatContentPart],
         tools: [ToolDefinition],
         maxTokens: Int = 1000,
-        temperature: Double = 0.2
+        temperature: Double = 0.2,
+        attempt: Int = 1
     ) async throws -> ChatResponse.Message {
         var base = Config.EXPO_PUBLIC_TOOLKIT_URL
         let key = Config.EXPO_PUBLIC_RORK_TOOLKIT_SECRET_KEY
@@ -668,10 +669,24 @@ nonisolated struct AIService {
         urlRequest.timeoutInterval = 120
         urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
         urlRequest.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
-        urlRequest.httpBody = try JSONEncoder().encode(body)
+        let encodedBody = try JSONEncoder().encode(body)
+        urlRequest.httpBody = encodedBody
+        let bodyBytes = encodedBody.count
 
-        let (data, response) = try await URLSession.shared.data(for: urlRequest)
+        let start = Date()
+        let (data, response): (Data, URLResponse)
+        do {
+            (data, response) = try await URLSession.shared.data(for: urlRequest)
+        } catch {
+            let elapsed = Date().timeIntervalSince(start)
+            AppLog.ai.error("AI network failed: model=\(model, privacy: .public), elapsed=\(String(format: "%.2fs", elapsed), privacy: .public), bodyBytes=\(bodyBytes, privacy: .public), attempt=\(attempt, privacy: .public), error=\(error.localizedDescription, privacy: .public)")
+            throw error
+        }
+
+        let elapsed = Date().timeIntervalSince(start)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        AppLog.ai.info("AI network: model=\(model, privacy: .public), status=\(status, privacy: .public), elapsed=\(String(format: "%.2fs", elapsed), privacy: .public), bodyBytes=\(bodyBytes, privacy: .public), attempt=\(attempt, privacy: .public)")
+
         switch status {
         case 200..<300: break
         case 401, 403: throw AIError.auth

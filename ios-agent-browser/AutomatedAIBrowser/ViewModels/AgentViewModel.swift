@@ -1,6 +1,7 @@
 import UIKit
 import WebKit
 import Observation
+import OSLog
 
 /// Drives the plan-see-decide-act-verify loop: write the mission checklist,
 /// snapshot the page, ask the AI, execute the action, and — before any run can
@@ -13,7 +14,17 @@ final class AgentViewModel {
     var mode: AgentMode
     var isFeedPresented = false
 
-    private(set) var phase: AgentPhase = .idle
+    private var phaseIntervalState: OSSignpostIntervalState?
+
+    private(set) var phase: AgentPhase = .idle {
+        didSet {
+            guard phase != oldValue else { return }
+            if let state = phaseIntervalState {
+                AppLog.loopSignposter.endInterval("Phase", state, "\(oldValue.label, privacy: .public)")
+            }
+            phaseIntervalState = AppLog.loopSignposter.beginInterval("Phase", id: .exclusive, "\(phase.label, privacy: .public)")
+        }
+    }
     private(set) var steps: [AgentStep] = []
     private(set) var activeGoal: String?
     private(set) var currentStepIndex = 0
@@ -329,6 +340,7 @@ final class AgentViewModel {
     // MARK: - The loop
 
     private func runLoop(goal: String) async {
+        AppLog.loop.info("Run started: goal length=\(goal.count, privacy: .public), maxSteps=\(self.maxStepsThisRun, privacy: .public)")
         var extracted: String?
 
         // Free, offline, and it makes the paid planning call sharper.
@@ -361,8 +373,15 @@ final class AgentViewModel {
         }
 
         while index < maxStepsThisRun {
+            let stepStart = Date()
             index += 1
             currentStepIndex = index
+
+            defer {
+                if let last = steps.last, last.index == index {
+                    logStepProgress(step: last, duration: Date().timeIntervalSince(stepStart))
+                }
+            }
 
             guard !Task.isCancelled else {
                 finishRun(.stopped, "Stopped by you.", goal: goal)
@@ -430,6 +449,7 @@ final class AgentViewModel {
                 onDeviceReady: isFreeTierReady
             )
             var route = ModelRouter.route(routingInputs)
+            AppLog.ai.info("Routed step \(index, privacy: .public): model=\(route.choice.modelID, privacy: .public), reason=\(route.reason, privacy: .public)")
             let allowShortlist = settings.weighAlternatives && read.difficulty == .hard
 
             phase = .thinking
@@ -444,9 +464,12 @@ final class AgentViewModel {
                 case .decided(let action, let reasoning):
                     freeCallCount += 1
                     turn = .move(AgentDecision(reasoning: reasoning, action: action))
+                    AppLog.ai.info("Tier answered: on-device free tier")
                 case .handedOver(let why):
                     handoffNote = why
+                    AppLog.ai.info("Tier handoff: \(why, privacy: .public)")
                     route = ModelRouter.cloudRoute(routingInputs)
+                    AppLog.ai.info("Rerouted to cloud model: \(route.choice.modelID, privacy: .public), reason=\(route.reason, privacy: .public)")
                 }
             }
 
@@ -481,6 +504,7 @@ final class AgentViewModel {
                     hasDossier: canOfferDossier(for: observation),
                     modelID: route.choice.modelID
                     ))
+                    AppLog.ai.info("Tier answered: cloud (\(route.choice.modelID, privacy: .public))")
                 } catch {
                     if Task.isCancelled || error is CancellationError {
                         finishRun(.stopped, "Stopped by you.", goal: goal)
@@ -736,16 +760,19 @@ final class AgentViewModel {
         guard var current = plan else {
             steps[last].result = "there is no mission plan to revise (planning is off) — carry on with the goal as written"
             holdMistakeAsRule(wasForced)
+            AppLog.loop.info("Plan revision refused: no mission plan")
             return
         }
         guard current.canRevise else {
             steps[last].result = "plan rewrite refused — this mission's \(MissionPlan.maxRevisions)-rewrite limit is used up; work the plan you have or report honestly"
             holdMistakeAsRule(wasForced)
+            AppLog.loop.info("Plan revision refused: max revisions limit reached")
             return
         }
         let drafts = action.tasks ?? []
         guard !drafts.isEmpty else {
             steps[last].result = "revise_plan arrived with no tasks — the plan is unchanged"
+            AppLog.loop.info("Plan revision refused: empty task list")
             return
         }
 
@@ -757,6 +784,7 @@ final class AgentViewModel {
         lastCurrentTaskNumber = current.currentTask?.number
         let plural = drafts.count == 1 ? "" : "s"
         steps[last].result = "plan revised — \(drafts.count) task\(plural) ahead, \(current.doneCount) already done (rewrite \(current.revisions) of \(MissionPlan.maxRevisions))"
+        AppLog.loop.info("Plan revision: revision=\(current.revisions, privacy: .public) of \(MissionPlan.maxRevisions, privacy: .public), tasksAhead=\(drafts.count, privacy: .public), alreadyDone=\(current.doneCount, privacy: .public)")
         Haptics.success()
     }
 
@@ -1009,6 +1037,7 @@ final class AgentViewModel {
         guard settings.memoryEnabled, settings.headStartEnabled else { return 0 }
         guard let match = recalledMatch, let replay = HeadStart.plan(from: match.recipe) else { return 0 }
         guard !Task.isCancelled else { return 0 }
+        AppLog.loop.info("Head-start entry: proposed=\(replay.moves.count, privacy: .public) moves")
 
         var summary = AgentAction(type: AgentActionKind.headStart.rawValue)
         summary.summary = replay.proposalText
@@ -1035,6 +1064,7 @@ final class AgentViewModel {
                 steps[entryIndex].status = .rejected
                 steps[entryIndex].result = "you skipped the head start — working from a fresh look instead"
                 headStartOver = true
+                AppLog.loop.info("Head-start exit: skipped or cancelled")
                 return 0
             }
         }
@@ -1095,12 +1125,14 @@ final class AgentViewModel {
         headStartHeld = true
         let plural = used == 1 ? "" : "s"
         steps[entryIndex].result = "replayed \(used) opening move\(plural) from memory — \(used) step\(plural) used, no decisions paid for"
+        AppLog.loop.info("Head-start exit: completed \(used, privacy: .public) moves")
         return used
     }
 
     /// Ends the head start honestly and marks the recipe as having gone stale. The
     /// replay does not try again for the rest of the run.
     private func stopHeadStart(at entryIndex: Int, move: Int, reason: String, recipeID: UUID, replayed: Int) {
+        AppLog.loop.info("Head-start exit: stopped at move \(move, privacy: .public), replayed=\(replayed, privacy: .public), reason=\(reason, privacy: .private)")
         headStartOver = true
         headStartHeld = false
         replayedMoveCount = replayed
@@ -1377,6 +1409,7 @@ final class AgentViewModel {
     /// ladder, and a repair that works is written back so the next run is clean.
     private func runSavedReplay() async -> Int {
         guard let routine = activeRoutine, !routine.moves.isEmpty else { return 0 }
+        AppLog.loop.info("Saved-replay entry: routine=\(routine.title, privacy: .private), moves=\(routine.moves.count, privacy: .public)")
 
         var summary = AgentAction(type: AgentActionKind.replay.rawValue)
         let count = routine.moves.count
@@ -1403,6 +1436,7 @@ final class AgentViewModel {
             if Task.isCancelled || !approved {
                 steps[entryIndex].status = .rejected
                 steps[entryIndex].result = "you skipped the saved replay — working from a fresh look instead"
+                AppLog.loop.info("Saved-replay exit: skipped or cancelled")
                 return 0
             }
         }
@@ -1506,6 +1540,7 @@ final class AgentViewModel {
             line += ", \(healedMoveCount) step\(healedMoveCount == 1 ? "" : "s") repaired along the way"
         }
         steps[entryIndex].result = line
+        AppLog.loop.info("Saved-replay exit: finishedCleanly=\(self.routineFinishedCleanly, privacy: .public), replayed=\(used, privacy: .public) moves")
         return used
     }
 
@@ -1643,6 +1678,7 @@ final class AgentViewModel {
     /// Ends a replay honestly. It does not try again for the rest of the run — the
     /// normal look-decide loop takes over from exactly here.
     private func stopReplay(at entryIndex: Int, move: Int, reason: String, replayed: Int) {
+        AppLog.loop.info("Saved-replay exit: stopped at move \(move, privacy: .public), replayed=\(replayed, privacy: .public), reason=\(reason, privacy: .private)")
         headStartHeld = false
         replayedMoveCount = replayed
         routineFinishedCleanly = false
@@ -1730,6 +1766,7 @@ final class AgentViewModel {
         let wasWaiting = phase == .awaitingApproval
 
         mistakeCount += 1
+        AppLog.loop.info("User flagged mistake: count=\(self.mistakeCount, privacy: .public), note=\(clean, privacy: .private), rewindTarget=\(bookmark?.number ?? -1, privacy: .public)")
         replanRefusals = 0
         // Your correction always goes to the strongest model. This is the moment
         // the run can least afford a cheap guess.
@@ -1923,7 +1960,8 @@ final class AgentViewModel {
                 id: pair.match.id,
                 value: pair.value,
                 expectedName: lastObservation?.element(withID: pair.match.id)?.name ?? pair.match.probe.label,
-                isSelect: pair.match.probe.widget == .select
+                isSelect: pair.match.probe.widget == .select,
+                kind: pair.match.kind
             )
         }
 
@@ -1934,6 +1972,8 @@ final class AgentViewModel {
         let watcher = await webProxy.endReactionWatch()
 
         dossierFillCount += outcome.filled
+        let matchedKinds = plan.ready.map(\.kind.rawValue).joined(separator: ", ")
+        AppLog.loop.info("Dossier fill: filled=\(outcome.filled, privacy: .public), kinds=[\(matchedKinds, privacy: .public)], submitted=\(submit, privacy: .public)")
         let report = plan.agentReport(
             filled: outcome.filled,
             failures: outcome.failures,
@@ -2288,6 +2328,7 @@ final class AgentViewModel {
         let last = steps.count - 1
         guard last >= 0 else { return }
         if counted { rewindCount += 1 }
+        AppLog.loop.info("Rewind: targetBookmark=\(bookmark.number, privacy: .public), counted=\(counted, privacy: .public), reason=\(reason, privacy: .private)")
 
         let outcome = await webProxy.restore(bookmark)
         var landedNote: String?
@@ -2624,6 +2665,17 @@ final class AgentViewModel {
                 await self?.polishCautions(learned.drafts, host: learned.host)
             }
         }
+
+        let elapsed = Date().timeIntervalSince(runStartDate)
+        AppLog.loop.info("Run finished: outcome=\(outcome.rawValue, privacy: .public), steps=\(self.steps.count, privacy: .public), elapsed=\(String(format: "%.2fs", elapsed), privacy: .public), fast=\(self.fastCallCount, privacy: .public), precise=\(self.preciseCallCount, privacy: .public), planning=\(self.planningCallCount, privacy: .public), check=\(self.checkCallCount, privacy: .public), free=\(self.freeCallCount, privacy: .public), memory=\(self.memoryCallCount, privacy: .public), rewinds=\(self.rewindCount, privacy: .public), weighed=\(self.weighedMoveCount, privacy: .public), replayed=\(self.replayedMoveCount, privacy: .public), healed=\(self.healedMoveCount, privacy: .public), repair=\(self.repairCallCount, privacy: .public), dossierFill=\(self.dossierFillCount, privacy: .public), freeFieldMatch=\(self.freeFieldMatchCount, privacy: .public), cautionsUsed=\(self.cautionsUsedCount, privacy: .public), mistakes=\(self.mistakeCount, privacy: .public)")
+    }
+
+    private func logStepProgress(step: AgentStep, duration: TimeInterval) {
+        let elementName = step.action.elementName ?? "none"
+        let model = step.modelChoice?.rawValue ?? "unknown"
+        let reason = step.routingReason ?? "none"
+        let result = step.result ?? ""
+        AppLog.loop.info("Step \(step.index, privacy: .public): kind=\(step.action.kind.rawValue, privacy: .public), element=\(elementName, privacy: .private), model=\(model, privacy: .public), reason=\(reason, privacy: .public), result=\(result, privacy: .private), duration=\(String(format: "%.2fs", duration), privacy: .public)")
     }
 
     /// Writes the attempt back onto the saved replay it came from: how many times

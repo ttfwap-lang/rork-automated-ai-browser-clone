@@ -110,7 +110,7 @@ final class WebViewProxy: NSObject, WKNavigationDelegate {
         panelRoutes = [:]
         let raw = await runJS(PageScanner.scanScript)
         guard let observation = PageScanner.parse(raw) else {
-            print("[WebViewProxy] page scan unavailable: \(String(raw.prefix(120)))")
+            AppLog.webview.warning("Page scan unavailable: \(String(raw.prefix(120)), privacy: .private)")
             return nil
         }
         return await mergingPanelElements(into: observation)
@@ -249,6 +249,8 @@ final class WebViewProxy: NSObject, WKNavigationDelegate {
     // MARK: - WKNavigationDelegate
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        let url = AppLog.sanitize(url: webView.url)
+        AppLog.webview.info("Navigation started: \(url, privacy: .private)")
         isLoading = true
         frameRegistry.reset()
         panelRoutes = [:]
@@ -256,20 +258,28 @@ final class WebViewProxy: NSObject, WKNavigationDelegate {
     }
 
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        let url = AppLog.sanitize(url: webView.url)
+        AppLog.webview.info("Navigation committed: \(url, privacy: .private)")
         syncState()
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        let url = AppLog.sanitize(url: webView.url)
+        AppLog.webview.info("Navigation finished: \(url, privacy: .private)")
         isLoading = false
         syncState()
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        let url = AppLog.sanitize(url: webView.url)
+        AppLog.webview.error("Navigation failed: \(url, privacy: .private), error=\(error.localizedDescription, privacy: .public)")
         isLoading = false
         syncState()
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        let url = AppLog.sanitize(url: webView.url)
+        AppLog.webview.error("Provisional navigation failed: \(url, privacy: .private), error=\(error.localizedDescription, privacy: .public)")
         isLoading = false
         syncState()
     }

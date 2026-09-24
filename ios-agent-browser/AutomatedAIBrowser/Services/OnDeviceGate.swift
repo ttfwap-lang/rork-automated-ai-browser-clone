@@ -44,6 +44,14 @@ nonisolated enum OnDeviceGate {
 
     /// Reviews one proposed free move against the live page.
     static func review(_ action: AgentAction, against observation: PageObservation?) -> Ruling {
+        let ruling = performReview(action, against: observation)
+        if case .rejected(let why) = ruling {
+            AppLog.ai.info("OnDeviceGate rejected free-tier answer: \(why, privacy: .private)")
+        }
+        return ruling
+    }
+
+    private static func performReview(_ action: AgentAction, against observation: PageObservation?) -> Ruling {
         guard allowedKinds.contains(action.kind) else {
             return .rejected("\(action.kind.label.lowercased()) is not a move your iPhone's model may make")
         }

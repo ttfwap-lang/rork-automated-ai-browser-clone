@@ -68,8 +68,13 @@ final class HistoryStore {
     }
 
     private func save() {
+        // NOTE: These disk writes are currently synchronous on the main actor
+        // (finding LAT-06, scheduled for Stage 2.6). Observe latency here, do not fix it.
+        let start = Date()
         guard let data = try? JSONEncoder().encode(runs) else { return }
         try? data.write(to: fileURL, options: .atomic)
+        let elapsed = Date().timeIntervalSince(start)
+        AppLog.persistence.info("Saved runs to disk: count=\(self.runs.count, privacy: .public), elapsed=\(String(format: "%.4fs", elapsed), privacy: .public)")
     }
 
     private func removeThumbnails(_ run: AgentRun) {

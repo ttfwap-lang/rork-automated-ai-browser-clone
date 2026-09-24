@@ -23,6 +23,15 @@ extension WebViewProxy {
         let value: String
         let expectedName: String
         let isSelect: Bool
+        let kind: DossierFieldKind?
+
+        init(id: Int, value: String, expectedName: String, isSelect: Bool, kind: DossierFieldKind? = nil) {
+            self.id = id
+            self.value = value
+            self.expectedName = expectedName
+            self.isSelect = isSelect
+            self.kind = kind
+        }
     }
 
     /// The honest outcome of a fill: how many landed, and which did not.
@@ -80,6 +89,9 @@ extension WebViewProxy {
             }
             try? await Task.sleep(for: .milliseconds(200))
         }
+
+        let matchedKinds = entries.compactMap { $0.kind?.rawValue }.joined(separator: ", ")
+        AppLog.webview.info("Dossier fill executed: filled=\(filled, privacy: .public) of \(entries.count, privacy: .public), kinds=[\(matchedKinds, privacy: .public)]")
 
         return FillOutcome(filled: filled, failures: failures)
     }
