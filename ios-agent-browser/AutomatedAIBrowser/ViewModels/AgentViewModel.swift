@@ -16,12 +16,56 @@ final class AgentViewModel {
 
     private var phaseIntervalState: OSSignpostIntervalState?
 
+    // Global Constants (Stage 1a.6)
+    let stepDeadlineDuration: TimeInterval = 90.0
+    let runBudgetDuration: TimeInterval = 600.0 // 10 minutes
+
+    private var runClockStart = Date()
+    private var accumulatedPausedTime: TimeInterval = 0
+    private var currentPauseStart: Date?
+
+    /// Active agent time elapsed so far this run, excluding human deliberation and post-run bookkeeping.
+    var agentElapsedTime: TimeInterval {
+        guard phase != .idle else { return 0 }
+        let now = Date()
+        var paused = accumulatedPausedTime
+        if let pauseStart = currentPauseStart {
+            paused += now.timeIntervalSince(pauseStart)
+        }
+        return max(0, now.timeIntervalSince(runClockStart) - paused)
+    }
+
+    var formattedElapsedTime: String {
+        let totalSeconds = Int(agentElapsedTime)
+        let minutes = totalSeconds / 60
+        let seconds = totalSeconds % 60
+        return String(format: "%d:%02d", minutes, seconds)
+    }
+
     private(set) var phase: AgentPhase = .idle {
         didSet {
             guard phase != oldValue else { return }
             if let state = phaseIntervalState {
                 AppLog.loopSignposter.endInterval("Phase", state, "\(oldValue.label, privacy: .public)")
+                phaseIntervalState = nil
             }
+
+            let wasPaused = (oldValue == .awaitingApproval || oldValue == .remembering)
+            let isPaused = (phase == .awaitingApproval || phase == .remembering)
+
+            if !wasPaused && isPaused {
+                currentPauseStart = Date()
+                AppLog.loop.info("Run clock paused: phase=\(self.phase.label, privacy: .public)")
+            } else if wasPaused && !isPaused {
+                if let start = currentPauseStart {
+                    let duration = Date().timeIntervalSince(start)
+                    accumulatedPausedTime += duration
+                    currentPauseStart = nil
+                    AppLog.loop.info("Run clock resumed: paused for \(String(format: "%.1fs", duration), privacy: .public), total agent time=\(String(format: "%.1fs", self.agentElapsedTime), privacy: .public)")
+                }
+            }
+
+            guard phase != .idle else { return }
             phaseIntervalState = AppLog.loopSignposter.beginInterval("Phase", id: .exclusive, "\(phase.label, privacy: .public)")
         }
     }
@@ -54,6 +98,7 @@ final class AgentViewModel {
     private var approvalContinuation: CheckedContinuation<Bool, Never>?
     private var runStartDate = Date()
     private var didPersistRun = false
+    private var didFinishRun = false
     /// The most recent page scan — used to resolve element targets at act time.
     private var lastObservation: PageObservation?
     /// Whole-page overview captured by page_overview, delivered with the NEXT decision.
@@ -199,6 +244,41 @@ final class AgentViewModel {
         self.routines = routines
         self.dossier = dossier
         self.mode = settings.defaultMode
+
+        webProxy.onWebContentProcessTerminated = { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.handleContentProcessTermination()
+            }
+        }
+    }
+
+    // MARK: - Process Recovery (Stage 1a.7)
+
+    private func handleContentProcessTermination() {
+        AppLog.loop.warning("Web content process termination: marking observation stale and recording honest step")
+        lastObservation = nil
+        mustEscalate = true
+
+        if isRunning {
+            if let lastIndex = steps.indices.last, steps[lastIndex].status == .proposed {
+                steps[lastIndex].status = .failed
+                steps[lastIndex].result = "web process terminated (jetsam) — page reloaded"
+                lastResultLine = steps[lastIndex].result
+            } else {
+                let step = AgentStep(
+                    index: currentStepIndex > 0 ? currentStepIndex : 1,
+                    action: AgentAction(type: "reload"),
+                    reasoning: "Web content process terminated under memory pressure",
+                    result: "web process terminated (jetsam) — page reloaded",
+                    status: .failed,
+                    snapshot: nil,
+                    pageMap: nil
+                )
+                steps.append(step)
+                lastResultLine = step.result
+            }
+            Haptics.warning()
+        }
     }
 
     /// True when the free tier is switched on AND this iPhone can actually run it.
@@ -304,14 +384,23 @@ final class AgentViewModel {
             maxStepsThisRun = max(settings.maxSteps, pending.routine.moves.count + 4)
         }
         runStartDate = Date()
+        runClockStart = Date()
+        accumulatedPausedTime = 0
+        currentPauseStart = nil
         didPersistRun = false
+        didFinishRun = false
         isFeedPresented = true
         Haptics.medium()
+        AppLog.loop.info("Lifecycle: startRun initiated")
         // Warm the free model so its first answer is instant rather than sluggish.
         if settings.onDeviceFirst {
             onDevice.warmUp()
         }
         runTask = Task { [weak self] in
+            defer {
+                self?.runTask = nil
+                AppLog.loop.info("Lifecycle: runTask cleared in defer")
+            }
             await self?.runLoop(goal: goal)
         }
     }
@@ -319,6 +408,7 @@ final class AgentViewModel {
     func stopRun() {
         guard runTask != nil else { return }
         Haptics.warning()
+        AppLog.loop.info("Lifecycle: stopRun called")
         runTask?.cancel()
         resumeApproval(false)
     }
@@ -335,6 +425,95 @@ final class AgentViewModel {
 
     func dismissBanner() {
         outcomeBanner = nil
+    }
+
+    // MARK: - Budget & Deadline Helpers (Stage 1a.6)
+
+    private func partialRunSummary() -> String {
+        let executed = steps.filter { $0.status == .executed }
+        if executed.isEmpty {
+            return "No moves were completed before the timeout."
+        }
+        let lines = executed.suffix(5).map { step in
+            "• Step \(step.index): \(step.action.type) — \(step.result ?? "executed")"
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private func checkRunBudget(goal: String) -> Bool {
+        let elapsed = agentElapsedTime
+        if elapsed >= runBudgetDuration {
+            AppLog.loop.error("Run budget exceeded: elapsed=\(String(format: "%.1fs", elapsed), privacy: .public), budget=\(self.runBudgetDuration, privacy: .public), phase=\(self.phase.label, privacy: .public)")
+            let summary = partialRunSummary()
+            finishRun(
+                .failed,
+                "Run exceeded the \(Int(self.runBudgetDuration / 60))-minute agent time budget.\n\nRecent progress:\n\(summary)",
+                goal: goal
+            )
+            return false
+        }
+        return true
+    }
+
+    private enum StepSegmentOutcome<T> {
+        case success(T)
+        case timedOut(AgentPhase)
+        case cancelled
+    }
+
+    private func runBoundedSegment<T>(
+        timeout: TimeInterval,
+        operation: @escaping () async -> T
+    ) async -> StepSegmentOutcome<T> {
+        guard !Task.isCancelled else { return .cancelled }
+
+        let capturedPhase = self.phase
+        let workerTask = Task { () -> T in
+            await operation()
+        }
+
+        let timeoutTask = Task {
+            try? await Task.sleep(nanoseconds: UInt64(max(0.1, timeout) * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            workerTask.cancel()
+        }
+
+        let result = await workerTask.value
+        let wasCancelled = workerTask.isCancelled
+        timeoutTask.cancel()
+
+        if wasCancelled {
+            if Task.isCancelled {
+                return .cancelled
+            }
+            return .timedOut(capturedPhase)
+        }
+        return .success(result)
+    }
+
+    private func recordTimedOutStep(index: Int, phase: AgentPhase) {
+        // C-1: "js error: timed out" sentinel matched by ReactionWatch.readsAsFailure.
+        // Stage 1b.2 introduces MoveOutcome.scriptTimedOut and converts this.
+        let sentinelResult = "js error: timed out during \(phase.label.lowercased())"
+        var step = AgentStep(
+            index: index,
+            action: AgentAction(type: "wait"),
+            reasoning: "Step deadline (90s) exceeded",
+            result: sentinelResult,
+            status: .failed,
+            snapshot: nil,
+            pageMap: nil
+        )
+        steps.append(step)
+        lastResultLine = sentinelResult
+        mustEscalate = true
+        Haptics.warning()
+    }
+
+    private enum StepPreparationOutcome {
+        case ready(action: AgentAction, snapshot: UIImage?, observation: PageObservation?, fingerprint: ElementFingerprint?, extracted: String?)
+        case loopContinue
+        case loopReturn
     }
 
     // MARK: - The loop
@@ -373,13 +552,15 @@ final class AgentViewModel {
         }
 
         while index < maxStepsThisRun {
+            guard checkRunBudget(goal: goal) else { return }
+
             let stepStart = Date()
             index += 1
             currentStepIndex = index
 
             defer {
-                if let last = steps.last, last.index == index {
-                    logStepProgress(step: last, duration: Date().timeIntervalSince(stepStart))
+                if let step = steps.last(where: { $0.index == index }) {
+                    logStepProgress(step: step, duration: Date().timeIntervalSince(stepStart))
                 }
             }
 
@@ -388,295 +569,377 @@ final class AgentViewModel {
                 return
             }
 
-            // A rewind you asked for while flagging a mistake happens before
-            // anything else, so the agent rethinks from where you sent it rather
-            // than from where it went wrong.
-            if let target = userRewindTarget, !steps.isEmpty {
-                userRewindTarget = nil
-                phase = .acting
-                await rewind(to: target, reason: "you sent the agent back here after flagging a mistake", counted: false)
-            }
+            var stepDeadlineRemaining = stepDeadlineDuration
+            let seg1Start = Date()
 
-            phase = .observing
-            await webProxy.waitForQuiet(maxWait: 8)
-            guard !Task.isCancelled else {
-                finishRun(.stopped, "Stopped by you.", goal: goal)
-                return
-            }
-            let observation = await webProxy.observe()
-            lastObservation = observation
-            if observation?.overlayLikely == true { overlaySeenThisRun = true }
-            guard let rawSnapshot = await webProxy.snapshot() else {
-                finishRun(.failed, "Couldn't capture the page. Try again once a page is loaded.", goal: goal)
-                return
-            }
-            let snapshotImage = observation.map { SnapshotAnnotator.annotate(rawSnapshot, with: $0) } ?? rawSnapshot
+            var currentExtracted = extracted
+            let seg1Outcome = await runBoundedSegment(timeout: stepDeadlineRemaining) { [weak self] () -> StepPreparationOutcome? in
+                guard let self = self else { return .loopReturn }
 
-            // Consume the overview captured last step (if any) — it rides along
-            // with THIS decision and is recorded on THIS step for Agent Vision.
-            let overview = pendingOverview
-            pendingOverview = nil
-            // The check's objection is handed over exactly once.
-            let objection = pendingObjection
-            pendingObjection = nil
-            // Yours is handed over once as a demand to rewrite the route, and then
-            // every remaining step once it has become a standing rule.
-            let mistake = pendingMistakeNote ?? (mistakeRuleOnly ? mistakeRule : nil)
-            pendingMistakeNote = nil
-            let deadEnds = pendingDeadEndNote
-            pendingDeadEndNote = nil
-            let rescue = pendingRescueNote
-            pendingRescueNote = nil
-            let runnerUpNote = pendingRunnerUpNote
-            pendingRunnerUpNote = nil
-
-            // The difficulty read costs nothing and decides both which model
-            // answers this step and whether alternatives are drafted.
-            let read = DifficultyScout.read(DifficultyScout.Signals(
-                isFirstStep: index == 1,
-                observation: observation,
-                lastResult: lastResultLine,
-                isRepeating: isRepeatingRecently(),
-                taskStuckCount: taskStuckCount,
-                hasObjection: objection != nil || mistake != nil
-            ))
-            let routingInputs = ModelRouter.Inputs(
-                strategy: settings.modelStrategy,
-                preferred: settings.model,
-                read: read,
-                isFirstStep: index == 1,
-                mustEscalate: mustEscalate,
-                onDeviceReady: isFreeTierReady
-            )
-            var route = ModelRouter.route(routingInputs)
-            AppLog.ai.info("Routed step \(index, privacy: .public): model=\(route.choice.modelID, privacy: .public), reason=\(route.reason, privacy: .public)")
-            let allowShortlist = settings.weighAlternatives && read.difficulty == .hard
-
-            phase = .thinking
-            var turn: AgentTurn?
-            // Set when the free tier was asked and the cloud had to take over.
-            var handoffNote: String?
-
-            // The free tier gets first refusal, and nothing it says is trusted on
-            // faith: every answer is checked against the live page before it runs.
-            if route.choice == .onDevice {
-                switch await freeDecision(goal: goal, observation: observation) {
-                case .decided(let action, let reasoning):
-                    freeCallCount += 1
-                    turn = .move(AgentDecision(reasoning: reasoning, action: action))
-                    AppLog.ai.info("Tier answered: on-device free tier")
-                case .handedOver(let why):
-                    handoffNote = why
-                    AppLog.ai.info("Tier handoff: \(why, privacy: .public)")
-                    route = ModelRouter.cloudRoute(routingInputs)
-                    AppLog.ai.info("Rerouted to cloud model: \(route.choice.modelID, privacy: .public), reason=\(route.reason, privacy: .public)")
+                if let target = self.userRewindTarget, !self.steps.isEmpty {
+                    self.userRewindTarget = nil
+                    self.phase = .acting
+                    await self.rewind(to: target, reason: "you sent the agent back here after flagging a mistake", counted: false)
                 }
-            }
 
-            if turn == nil {
-                do {
-                    turn = try await ai.decide(AIService.DecisionRequest(
-                    goal: goal,
-                    urlString: webProxy.webView.url?.absoluteString ?? "",
-                    pageTitle: webProxy.webView.title ?? "",
-                    stepIndex: index,
-                    maxSteps: maxStepsThisRun,
-                    historyLines: historyLines(),
-                    extractedText: extracted,
-                    pageMap: observation?.mapText,
-                    imageBase64: Self.jpegBase64(from: snapshotImage),
-                    overviewImageBase64: overview.map { Self.jpegBase64(from: $0.image, maxBytes: 1_500_000, startQuality: 0.55) },
-                    overviewNote: overview?.note,
-                    planBriefing: plan?.briefingText,
-                    objection: objection,
-                    nudge: stuckNudge(),
-                    difficultyNote: read.briefingNote,
-                    bookmarksNote: bookmarksNote(),
-                    runnerUpNote: runnerUpNote,
-                    deadEndNote: deadEnds,
-                    rescueNote: rescue,
-                    memoryNote: memoryNote,
-                    cautionNote: cautionNote,
-                    mistakeNote: mistake,
-                    dossierNote: dossierNote(for: observation),
-                    allowShortlist: allowShortlist,
-                    hasBookmarks: settings.bookmarksEnabled && !bookmarks.isEmpty && !checkpointsUnavailable,
-                    hasDossier: canOfferDossier(for: observation),
-                    modelID: route.choice.modelID
-                    ))
-                    AppLog.ai.info("Tier answered: cloud (\(route.choice.modelID, privacy: .public))")
-                } catch {
-                    if Task.isCancelled || error is CancellationError {
-                        finishRun(.stopped, "Stopped by you.", goal: goal)
-                    } else {
-                        finishRun(.failed, error.localizedDescription, goal: goal)
+                self.phase = .observing
+                await self.webProxy.waitForQuiet(maxWait: 8)
+                guard !Task.isCancelled else {
+                    self.finishRun(.stopped, "Stopped by you.", goal: goal)
+                    return .loopReturn
+                }
+                if self.webProxy.consumeContentProcessTermination() {
+                    AppLog.loop.warning("Content process termination detected at start of step; observation marked stale")
+                    self.lastObservation = nil
+                }
+                let observation = await self.webProxy.observe()
+                self.lastObservation = observation
+                if observation?.overlayLikely == true { self.overlaySeenThisRun = true }
+
+                var rawSnapshot = await self.webProxy.snapshot()
+                if rawSnapshot == nil {
+                    AppLog.webview.warning("Snapshot returned nil; retrying once after settle...")
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                    guard !Task.isCancelled else {
+                        self.finishRun(.stopped, "Stopped by you.", goal: goal)
+                        return .loopReturn
                     }
-                    return
+                    rawSnapshot = await self.webProxy.snapshot()
+                    if rawSnapshot == nil {
+                        AppLog.webview.warning("Snapshot still nil after retry; proceeding vision-less")
+                    }
                 }
-            }
+                let snapshotImage: UIImage? = rawSnapshot.flatMap { raw in
+                    observation.map { SnapshotAnnotator.annotate(raw, with: $0) } ?? raw
+                }
 
-            guard let resolvedTurn = turn else {
-                finishRun(.failed, "No decision came back for this step. Please run it again.", goal: goal)
-                return
-            }
-            extracted = nil
+                let overview = self.pendingOverview
+                self.pendingOverview = nil
+                let objection = self.pendingObjection
+                self.pendingObjection = nil
+                let mistake = self.pendingMistakeNote ?? (self.mistakeRuleOnly ? self.mistakeRule : nil)
+                self.pendingMistakeNote = nil
+                let deadEnds = self.pendingDeadEndNote
+                self.pendingDeadEndNote = nil
+                let rescue = self.pendingRescueNote
+                self.pendingRescueNote = nil
+                let runnerUpNote = self.pendingRunnerUpNote
+                self.pendingRunnerUpNote = nil
 
-            var resolvedAction: AgentAction
-            var reasoningText: String
-            var weighed: [MoveCandidate] = []
-
-            switch resolvedTurn {
-            case .move(let decision):
-                resolvedAction = decision.action
-                reasoningText = decision.reasoning ?? ""
-            case .shortlist(let reasoning, let drafted):
-                weighed = CandidateScorer.score(drafted, in: CandidateScorer.Context(
+                let read = DifficultyScout.read(DifficultyScout.Signals(
+                    isFirstStep: index == 1,
                     observation: observation,
-                    failedSignatures: failedSignatures,
-                    currentTask: plan?.currentTask
+                    lastResult: self.lastResultLine,
+                    isRepeating: self.isRepeatingRecently(),
+                    taskStuckCount: self.taskStuckCount,
+                    hasObjection: objection != nil || mistake != nil
                 ))
-                guard let winner = weighed.first else {
-                    finishRun(.failed, "The AI weighed no usable moves. Please run it again.", goal: goal)
-                    return
-                }
-                weighedMoveCount += weighed.count
-                resolvedAction = winner.action
-                var pieces: [String] = []
-                if let reasoning, !reasoning.isEmpty { pieces.append(reasoning) }
-                if !winner.rationale.isEmpty { pieces.append("picked: \(winner.rationale)") }
-                reasoningText = pieces.joined(separator: " — ")
-                runnerUp = weighed.dropFirst().first
-            }
-
-            var fingerprint: ElementFingerprint?
-            if let elementID = resolvedAction.element, let observation,
-               let match = observation.element(withID: elementID) {
-                resolvedAction.elementName = match.shortDescriptor
-                fingerprint = ElementFingerprint.make(for: match, in: observation)
-            }
-            countCall(on: route.choice)
-
-            var step = AgentStep(
-                index: index,
-                action: resolvedAction,
-                reasoning: reasoningText,
-                result: nil,
-                status: .proposed,
-                snapshot: snapshotImage,
-                pageMap: observation?.mapText
-            )
-            step.overviewImage = overview?.image
-            step.overviewNote = overview?.note
-            step.taskNumber = resolvedAction.task
-            step.taskTitle = resolvedAction.task.flatMap { plan?.task(numbered: $0)?.title }
-            step.modelChoice = route.choice
-            step.routingReason = handoffNote.map { "\(route.reason) — your iPhone's model handed it over: \($0)" } ?? route.reason
-            step.targetFingerprint = fingerprint
-            step.difficulty = read.difficulty
-            step.difficultyReason = read.summary
-            step.candidates = weighed
-            steps.append(step)
-            trimStoredImages()
-            Haptics.light()
-
-            switch resolvedAction.kind {
-            case .done:
-                switch await handleClaimedDone(resolvedAction, goal: goal) {
-                case .finished: return
-                case .backToWork: continue
-                }
-            case .fail:
-                let reason = resolvedAction.reason ?? "The agent couldn't complete the goal."
-                lastFailReason = reason
-                if let target = rescueTarget(for: reason), index < maxStepsThisRun {
-                    didOfferRescue = true
-                    steps[steps.count - 1].status = .executed
-                    steps[steps.count - 1].result = "not so fast — checkpoint \(target.number) still has an untried route"
-                    pendingRescueNote = "YOU JUST GAVE UP, AND IT IS BEING PUSHED BACK — ONCE. Checkpoint \(target.number) (\(target.label)) still has a route you have not tried. From there you already tried: \(target.triedLine). Either rewind to it and try something genuinely different, or call fail again and the run ends."
-                    Haptics.warning()
-                    continue
-                }
-                steps[steps.count - 1].status = .terminal
-                finishRun(
-                    .failed,
-                    didOfferRescue ? "\(reason)\n\nA rescue was offered and declined." : reason,
-                    goal: goal
+                let routingInputs = ModelRouter.Inputs(
+                    strategy: self.settings.modelStrategy,
+                    preferred: self.settings.model,
+                    read: read,
+                    isFirstStep: index == 1,
+                    mustEscalate: self.mustEscalate,
+                    onDeviceReady: self.isFreeTierReady
                 )
-                return
-            default:
-                break
-            }
+                var route = ModelRouter.route(routingInputs)
+                AppLog.ai.info("Routed step \(index, privacy: .public): model=\(route.choice.modelID, privacy: .public), reason=\(route.reason, privacy: .public)")
+                let allowShortlist = self.settings.weighAlternatives && read.difficulty == .hard
 
-            // Your objection outranks the model. A move you flagged never runs
-            // again, and while a rewrite is outstanding the page stays off limits
-            // until the route actually changes.
-            if let refusal = refusalReason(for: resolvedAction) {
-                steps[steps.count - 1].status = .rejected
-                steps[steps.count - 1].result = refusal
-                Haptics.warning()
+                self.phase = .thinking
+                var turn: AgentTurn?
+                var handoffNote: String?
+
+                if route.choice == .onDevice {
+                    switch await self.freeDecision(goal: goal, observation: observation) {
+                    case .decided(let action, let reasoning):
+                        self.freeCallCount += 1
+                        turn = .move(AgentDecision(reasoning: reasoning, action: action))
+                        AppLog.ai.info("Tier answered: on-device free tier")
+                    case .handedOver(let why):
+                        handoffNote = why
+                        AppLog.ai.info("Tier handoff: \(why, privacy: .private)")
+                        route = ModelRouter.cloudRoute(routingInputs)
+                        AppLog.ai.info("Rerouted to cloud model: \(route.choice.modelID, privacy: .public), reason=\(route.reason, privacy: .public)")
+                    }
+                }
+
+                if turn == nil {
+                    do {
+                        turn = try await self.ai.decide(
+                            AIService.DecisionRequest(
+                                goal: goal,
+                                urlString: self.webProxy.webView.url?.absoluteString ?? "",
+                                pageTitle: self.webProxy.webView.title ?? "",
+                                stepIndex: index,
+                                maxSteps: self.maxStepsThisRun,
+                                historyLines: self.historyLines(),
+                                extractedText: currentExtracted,
+                                pageMap: observation?.mapText,
+                                imageBase64: Self.jpegBase64(from: snapshotImage),
+                                overviewImageBase64: overview.map { Self.jpegBase64(from: $0.image, maxBytes: 1_500_000, startQuality: 0.55) },
+                                overviewNote: overview?.note,
+                                planBriefing: self.plan?.briefingText,
+                                objection: objection,
+                                nudge: self.stuckNudge(),
+                                difficultyNote: read.briefingNote,
+                                bookmarksNote: self.bookmarksNote(),
+                                runnerUpNote: runnerUpNote,
+                                deadEndNote: deadEnds,
+                                rescueNote: rescue,
+                                memoryNote: self.memoryNote,
+                                cautionNote: self.cautionNote,
+                                mistakeNote: mistake,
+                                dossierNote: self.dossierNote(for: observation),
+                                allowShortlist: allowShortlist,
+                                hasBookmarks: self.settings.bookmarksEnabled && !self.bookmarks.isEmpty && !self.checkpointsUnavailable,
+                                hasDossier: self.canOfferDossier(for: observation),
+                                modelID: route.choice.modelID
+                            ),
+                            onRetry: { [weak self] attempt in
+                                Task { @MainActor [weak self] in
+                                    self?.phase = .retrying(attempt: attempt)
+                                }
+                            }
+                        )
+                        AppLog.ai.info("Tier answered: cloud (\(route.choice.modelID, privacy: .public))")
+                    } catch {
+                        if Task.isCancelled || error is CancellationError {
+                            self.finishRun(.stopped, "Stopped by you.", goal: goal)
+                        } else {
+                            self.finishRun(.failed, error.localizedDescription, goal: goal)
+                        }
+                        return .loopReturn
+                    }
+                }
+
+                guard let resolvedTurn = turn else {
+                    self.finishRun(.failed, "No decision came back for this step. Please run it again.", goal: goal)
+                    return .loopReturn
+                }
+                currentExtracted = nil
+
+                var resolvedAction: AgentAction
+                var reasoningText: String
+                var weighed: [MoveCandidate] = []
+
+                switch resolvedTurn {
+                case .move(let decision):
+                    resolvedAction = decision.action
+                    reasoningText = decision.reasoning ?? ""
+                case .shortlist(let reasoning, let drafted):
+                    weighed = CandidateScorer.score(drafted, in: CandidateScorer.Context(
+                        observation: observation,
+                        failedSignatures: self.failedSignatures,
+                        currentTask: self.plan?.currentTask
+                    ))
+                    guard let winner = weighed.first else {
+                        self.finishRun(.failed, "The AI weighed no usable moves. Please run it again.", goal: goal)
+                        return .loopReturn
+                    }
+                    self.weighedMoveCount += weighed.count
+                    resolvedAction = winner.action
+                    var pieces: [String] = []
+                    if let reasoning, !reasoning.isEmpty { pieces.append(reasoning) }
+                    if !winner.rationale.isEmpty { pieces.append("picked: \(winner.rationale)") }
+                    reasoningText = pieces.joined(separator: " — ")
+                    self.runnerUp = weighed.dropFirst().first
+                }
+
+                var fingerprint: ElementFingerprint?
+                if let elementID = resolvedAction.element, let observation,
+                   let match = observation.element(withID: elementID) {
+                    resolvedAction.elementName = match.shortDescriptor
+                    fingerprint = ElementFingerprint.make(for: match, in: observation)
+                }
+                self.countCall(on: route.choice)
+
+                var step = AgentStep(
+                    index: index,
+                    action: resolvedAction,
+                    reasoning: reasoningText,
+                    result: nil,
+                    status: .proposed,
+                    snapshot: snapshotImage,
+                    pageMap: observation?.mapText
+                )
+                step.overviewImage = overview?.image
+                step.overviewNote = overview?.note
+                step.taskNumber = resolvedAction.task
+                step.taskTitle = resolvedAction.task.flatMap { self.plan?.task(numbered: $0)?.title }
+                step.modelChoice = route.choice
+                let isRecoveryMove = (resolvedAction.kind == .extract && resolvedAction.reasoning?.contains("Unparseable") == true)
+                if isRecoveryMove {
+                    step.routingReason = "unparseable AI reply — safe recovery (extract)"
+                    AppLog.loop.warning("Step \(index, privacy: .public): AI decision unparseable twice; running safe recovery move (extract)")
+                } else {
+                    step.routingReason = handoffNote.map { "\(route.reason) — your iPhone's model handed it over: \($0)" } ?? route.reason
+                }
+                step.targetFingerprint = fingerprint
+                step.difficulty = read.difficulty
+                step.difficultyReason = read.summary
+                step.candidates = weighed
+                self.steps.append(step)
+                self.trimStoredImages()
+                Haptics.light()
+
+                switch resolvedAction.kind {
+                case .done:
+                    switch await self.handleClaimedDone(resolvedAction, goal: goal) {
+                    case .finished: return .loopReturn
+                    case .backToWork: return .loopContinue
+                    }
+                case .fail:
+                    let reason = resolvedAction.reason ?? "The agent couldn't complete the goal."
+                    self.lastFailReason = reason
+                    if let target = self.rescueTarget(for: reason), index < self.maxStepsThisRun {
+                        self.didOfferRescue = true
+                        self.steps[self.steps.count - 1].status = .executed
+                        self.steps[self.steps.count - 1].result = "not so fast — checkpoint \(target.number) still has an untried route"
+                        self.pendingRescueNote = "YOU JUST GAVE UP, AND IT IS BEING PUSHED BACK — ONCE. Checkpoint \(target.number) (\(target.label)) still has a route you have not tried. From there you already tried: \(target.triedLine). Either rewind to it and try something genuinely different, or call fail again and the run ends."
+                        Haptics.warning()
+                        return .loopContinue
+                    }
+                    self.steps[self.steps.count - 1].status = .terminal
+                    self.finishRun(
+                        .failed,
+                        self.didOfferRescue ? "\(reason)\n\nA rescue was offered and declined." : reason,
+                        goal: goal
+                    )
+                    return .loopReturn
+                default:
+                    break
+                }
+
+                if let refusal = self.refusalReason(for: resolvedAction) {
+                    self.steps[self.steps.count - 1].status = .rejected
+                    self.steps[self.steps.count - 1].result = refusal
+                    Haptics.warning()
+                    return .loopContinue
+                }
+
+                return .ready(action: resolvedAction, snapshot: rawSnapshot, observation: observation, fingerprint: fingerprint, extracted: currentExtracted)
+            }
+            extracted = currentExtracted
+
+            let prepResult: StepPreparationOutcome
+            switch seg1Outcome {
+            case .timedOut(let timeoutPhase):
+                AppLog.loop.warning("Step \(index, privacy: .public) timed out after \(Int(self.stepDeadlineDuration), privacy: .public)s: consumed by phase=\(timeoutPhase.label, privacy: .public)")
+                recordTimedOutStep(index: index, phase: timeoutPhase)
                 continue
-            }
-
-            if mode == .supervised {
-                phase = .awaitingApproval
-                Haptics.warning()
-                let approved = await waitForApproval()
+            case .cancelled:
                 guard !Task.isCancelled else {
                     finishRun(.stopped, "Stopped by you.", goal: goal)
                     return
                 }
-                if !approved {
-                    // Flagging already marked the move rejected and wrote your
-                    // entry into the log, so the run carries on from there.
-                    if didFlagDuringApproval {
-                        didFlagDuringApproval = false
-                        continue
+                continue
+            case .success(let outcome):
+                guard let outcome = outcome else { return }
+                prepResult = outcome
+            }
+
+            switch prepResult {
+            case .loopContinue: continue
+            case .loopReturn: return
+            case .ready(let resolvedAction, let rawSnapshot, let observation, let fingerprint, let stepExtracted):
+                extracted = stepExtracted
+                let elapsed1 = Date().timeIntervalSince(seg1Start)
+                stepDeadlineRemaining = max(10.0, stepDeadlineRemaining - elapsed1)
+
+                if mode == .supervised {
+                    phase = .awaitingApproval
+                    Haptics.warning()
+                    let approved = await waitForApproval()
+                    guard !Task.isCancelled else {
+                        finishRun(.stopped, "Stopped by you.", goal: goal)
+                        return
                     }
-                    if let target = userRewindTarget {
-                        userRewindTarget = nil
+                    if !approved {
+                        if didFlagDuringApproval {
+                            didFlagDuringApproval = false
+                            continue
+                        }
+                        if let target = userRewindTarget {
+                            userRewindTarget = nil
+                            steps[steps.count - 1].status = .rejected
+                            steps[steps.count - 1].result = "you sent the agent back to checkpoint \(target.number)"
+                            phase = .acting
+                            await rewind(to: target, reason: "you sent the agent back here", counted: false)
+                            continue
+                        }
                         steps[steps.count - 1].status = .rejected
-                        steps[steps.count - 1].result = "you sent the agent back to checkpoint \(target.number)"
-                        phase = .acting
-                        await rewind(to: target, reason: "you sent the agent back here", counted: false)
+                        steps[steps.count - 1].result = "rejected by you"
+                        finishRun(.stopped, "Run ended — you rejected the proposed action.", goal: goal)
+                        return
+                    }
+                }
+
+                phase = .acting
+                var actExtracted = extracted
+                let seg2Outcome = await runBoundedSegment(timeout: stepDeadlineRemaining) { [weak self] () -> Bool in
+                    guard let self = self else { return false }
+                    if resolvedAction.kind == .revisePlan {
+                        self.applyRevision(resolvedAction)
+                        return true
+                    }
+
+                    if resolvedAction.kind == .rewind {
+                        await self.performRewind(resolvedAction)
+                        return true
+                    }
+
+                    if self.shouldCapture(before: resolvedAction) {
+                        await self.captureBookmark(snapshot: rawSnapshot)
+                    }
+
+                    let execution = await self.execute(resolvedAction)
+                    var resultText = execution.result
+                    if observation == nil && rawSnapshot != nil {
+                        resultText += " · page scan unavailable (vision-only step)"
+                    } else if rawSnapshot == nil && observation != nil {
+                        resultText += " · snapshot unavailable (vision-less step)"
+                    } else if observation == nil && rawSnapshot == nil {
+                        resultText += " · page scan & snapshot unavailable"
+                    }
+                    self.steps[self.steps.count - 1].result = resultText
+                    self.steps[self.steps.count - 1].status = .executed
+                    self.steps[self.steps.count - 1].dossierNote = self.pendingDossierNote
+                    self.pendingDossierNote = nil
+                    actExtracted = execution.extracted
+                    self.lastResultLine = resultText
+                    self.recordExecutedMove(resolvedAction, fingerprint: fingerprint, result: resultText)
+                    self.applyChecklist(from: resolvedAction)
+                    self.noteOutcome(action: resolvedAction, result: resultText)
+                    return false
+                }
+                extracted = actExtracted
+
+                switch seg2Outcome {
+                case .timedOut(let timeoutPhase):
+                    AppLog.loop.warning("Step \(index, privacy: .public) timed out after \(Int(self.stepDeadlineDuration), privacy: .public)s: consumed by phase=\(timeoutPhase.label, privacy: .public)")
+                    if !steps.isEmpty {
+                        steps[steps.count - 1].status = .failed
+                        steps[steps.count - 1].result = "js error: timed out during acting"
+                    } else {
+                        recordTimedOutStep(index: index, phase: timeoutPhase)
+                    }
+                    lastResultLine = "js error: timed out during acting"
+                    mustEscalate = true
+                    Haptics.warning()
+                    continue
+                case .cancelled:
+                    guard !Task.isCancelled else {
+                        finishRun(.stopped, "Stopped by you.", goal: goal)
+                        return
+                    }
+                    continue
+                case .success(let wasSpecial):
+                    if wasSpecial {
                         continue
                     }
-                    steps[steps.count - 1].status = .rejected
-                    steps[steps.count - 1].result = "rejected by you"
-                    finishRun(.stopped, "Run ended — you rejected the proposed action.", goal: goal)
-                    return
                 }
             }
-
-            phase = .acting
-
-            if resolvedAction.kind == .revisePlan {
-                applyRevision(resolvedAction)
-                continue
-            }
-
-            if resolvedAction.kind == .rewind {
-                await performRewind(resolvedAction)
-                continue
-            }
-
-            if shouldCapture(before: resolvedAction) {
-                await captureBookmark(snapshot: rawSnapshot)
-            }
-
-            let execution = await execute(resolvedAction)
-            var resultText = execution.result
-            if observation == nil {
-                resultText += " · page scan unavailable (vision-only step)"
-            }
-            steps[steps.count - 1].result = resultText
-            steps[steps.count - 1].status = .executed
-            steps[steps.count - 1].dossierNote = pendingDossierNote
-            pendingDossierNote = nil
-            extracted = execution.extracted
-            lastResultLine = resultText
-            recordExecutedMove(resolvedAction, fingerprint: fingerprint, result: resultText)
-            applyChecklist(from: resolvedAction)
-            noteOutcome(action: resolvedAction, result: resultText)
         }
 
         hitStepLimit = true
@@ -702,15 +965,22 @@ final class AgentViewModel {
         planningCallCount += 1
         countCall(on: planningModel)
         do {
-            let written = try await ai.plan(AIService.PlanRequest(
-                goal: goal,
-                urlString: webProxy.webView.url?.absoluteString ?? "",
-                pageTitle: webProxy.webView.title ?? "",
-                modelID: planningModel.modelID,
-                refinement: refinement,
-                memoryNote: memoryNote,
-                cautionNote: cautionNote
-            ))
+            let written = try await ai.plan(
+                AIService.PlanRequest(
+                    goal: goal,
+                    urlString: webProxy.webView.url?.absoluteString ?? "",
+                    pageTitle: webProxy.webView.title ?? "",
+                    modelID: planningModel.modelID,
+                    refinement: refinement,
+                    memoryNote: memoryNote,
+                    cautionNote: cautionNote
+                ),
+                onRetry: { [weak self] attempt in
+                    Task { @MainActor [weak self] in
+                        self?.phase = .retrying(attempt: attempt)
+                    }
+                }
+            )
             plan = written
             planNote = nil
             lastCurrentTaskNumber = written.currentTask?.number
@@ -838,18 +1108,25 @@ final class AgentViewModel {
 
         let result: VerificationResult
         do {
-            result = try await ai.verify(AIService.VerifyRequest(
-                goal: goal,
-                successStatement: plan?.successStatement ?? goal,
-                answerShape: plan?.answerShape,
-                claimedResult: claimed,
-                actionTrail: actionTrail(),
-                urlString: webProxy.webView.url?.absoluteString ?? "",
-                pageTitle: webProxy.webView.title ?? "",
-                pageText: pageText,
-                imageBase64: fresh.map { Self.jpegBase64(from: $0) } ?? "",
-                modelID: checkModel.modelID
-            ))
+            result = try await ai.verify(
+                AIService.VerifyRequest(
+                    goal: goal,
+                    successStatement: plan?.successStatement ?? goal,
+                    answerShape: plan?.answerShape,
+                    claimedResult: claimed,
+                    actionTrail: actionTrail(),
+                    urlString: webProxy.webView.url?.absoluteString ?? "",
+                    pageTitle: webProxy.webView.title ?? "",
+                    pageText: pageText,
+                    imageBase64: fresh.map { Self.jpegBase64(from: $0) } ?? "",
+                    modelID: checkModel.modelID
+                ),
+                onRetry: { [weak self] attempt in
+                    Task { @MainActor [weak self] in
+                        self?.phase = .retrying(attempt: attempt)
+                    }
+                }
+            )
         } catch {
             if Task.isCancelled || error is CancellationError {
                 finishRun(.stopped, "Stopped by you.", goal: goal)
@@ -1073,51 +1350,67 @@ final class AgentViewModel {
         var used = 0
         for (offset, move) in replay.moves.enumerated() {
             guard !Task.isCancelled, !headStartOver, used < maxStepsThisRun else { break }
+            guard checkRunBudget(goal: activeGoal ?? "") else { break }
 
-            phase = .observing
-            await webProxy.waitForQuiet(maxWait: 6)
-            let observation = await webProxy.observe()
-            lastObservation = observation
-            let rawSnapshot = await webProxy.snapshot()
+            let moveOutcome = await runBoundedSegment(timeout: stepDeadlineDuration) { [weak self] () -> Bool in
+                guard let self = self else { return false }
+                self.phase = .observing
+                await self.webProxy.waitForQuiet(maxWait: 6)
+                let observation = await self.webProxy.observe()
+                self.lastObservation = observation
+                let rawSnapshot = await self.webProxy.snapshot()
 
-            switch HeadStart.resolve(move, in: observation) {
-            case .mismatch(let why):
-                stopHeadStart(at: entryIndex, move: offset + 1, reason: why, recipeID: match.recipe.id, replayed: used)
-                return used
+                switch HeadStart.resolve(move, in: observation) {
+                case .mismatch(let why):
+                    self.stopHeadStart(at: entryIndex, move: offset + 1, reason: why, recipeID: match.recipe.id, replayed: used)
+                    return false
 
-            case .matched(let action):
-                used += 1
-                currentStepIndex = used
-                let annotated: UIImage? = {
-                    guard let rawSnapshot else { return nil }
-                    guard let observation else { return rawSnapshot }
-                    return SnapshotAnnotator.annotate(rawSnapshot, with: observation)
-                }()
-                var step = AgentStep(
-                    index: used,
-                    action: action,
-                    reasoning: "replayed from a route that worked on this site before",
-                    result: nil,
-                    status: .executed,
-                    snapshot: annotated,
-                    pageMap: observation?.mapText
-                )
-                step.isReplayed = true
-                step.routingReason = "replayed from memory — no decision paid for"
-                step.targetFingerprint = move.target
-                steps.append(step)
-                trimStoredImages()
+                case .matched(let action):
+                    used += 1
+                    self.currentStepIndex = used
+                    let annotated: UIImage? = {
+                        guard let rawSnapshot else { return nil }
+                        guard let observation else { return rawSnapshot }
+                        return SnapshotAnnotator.annotate(rawSnapshot, with: observation)
+                    }()
+                    var step = AgentStep(
+                        index: used,
+                        action: action,
+                        reasoning: "replayed from a route that worked on this site before",
+                        result: nil,
+                        status: .executed,
+                        snapshot: annotated,
+                        pageMap: observation?.mapText
+                    )
+                    step.isReplayed = true
+                    step.routingReason = "replayed from memory — no decision paid for"
+                    step.targetFingerprint = move.target
+                    self.steps.append(step)
+                    self.trimStoredImages()
 
-                phase = .acting
-                let resultText = await execute(action).result
-                steps[steps.count - 1].result = resultText
-                lastResultLine = resultText
-                recordExecutedMove(action, fingerprint: move.target, result: resultText)
+                    self.phase = .acting
+                    let resultText = await self.execute(action).result
+                    self.steps[self.steps.count - 1].result = resultText
+                    self.lastResultLine = resultText
+                    self.recordExecutedMove(action, fingerprint: move.target, result: resultText)
 
-                if let why = HeadStart.heldUp(expected: move.expectedReaction, actual: resultText) {
-                    stopHeadStart(at: entryIndex, move: offset + 1, reason: why, recipeID: match.recipe.id, replayed: used)
-                    return used
+                    if let why = HeadStart.heldUp(expected: move.expectedReaction, actual: resultText) {
+                        self.stopHeadStart(at: entryIndex, move: offset + 1, reason: why, recipeID: match.recipe.id, replayed: used)
+                        return false
+                    }
+                    return true
                 }
+            }
+
+            switch moveOutcome {
+            case .timedOut(let timeoutPhase):
+                AppLog.loop.warning("Head-start move \(offset + 1, privacy: .public) timed out after \(Int(self.stepDeadlineDuration), privacy: .public)s: phase=\(timeoutPhase.label, privacy: .public)")
+                stopHeadStart(at: entryIndex, move: offset + 1, reason: "replayed move timed out after \(Int(self.stepDeadlineDuration))s during \(timeoutPhase.label.lowercased())", recipeID: match.recipe.id, replayed: used)
+                return used
+            case .cancelled:
+                return used
+            case .success(let continued):
+                if !continued { return used }
             }
         }
 
@@ -1445,15 +1738,37 @@ final class AgentViewModel {
         var used = 0
         for (offset, move) in routine.moves.enumerated() {
             guard !Task.isCancelled, used < maxStepsThisRun else { break }
+            guard checkRunBudget(goal: activeGoal ?? "") else { break }
 
-            phase = .replaying
-            await webProxy.waitForQuiet(maxWait: 6)
-            let observation = await webProxy.observe()
-            lastObservation = observation
-            if observation?.overlayLikely == true { overlaySeenThisRun = true }
-            let rawSnapshot = await webProxy.snapshot()
+            let partAOutcome = await runBoundedSegment(timeout: stepDeadlineDuration) { [weak self] () -> (resolution: SavedMoveResolution, snapshot: UIImage?, observation: PageObservation?)? in
+                guard let self = self else { return nil }
+                self.phase = .replaying
+                await self.webProxy.waitForQuiet(maxWait: 6)
+                let observation = await self.webProxy.observe()
+                self.lastObservation = observation
+                if observation?.overlayLikely == true { self.overlaySeenThisRun = true }
+                let rawSnapshot = await self.webProxy.snapshot()
+                let resolution = await self.resolveSavedMove(move, at: offset, in: observation, routine: routine)
+                return (resolution, rawSnapshot, observation)
+            }
 
-            let resolution = await resolveSavedMove(move, at: offset, in: observation, routine: routine)
+            let resolution: SavedMoveResolution
+            let rawSnapshot: UIImage?
+            let observation: PageObservation?
+            switch partAOutcome {
+            case .timedOut(let timeoutPhase):
+                AppLog.loop.warning("Saved-replay move \(offset + 1, privacy: .public) timed out after \(Int(self.stepDeadlineDuration), privacy: .public)s: phase=\(timeoutPhase.label, privacy: .public)")
+                stopReplay(at: entryIndex, move: offset + 1, reason: "replayed move timed out after \(Int(self.stepDeadlineDuration))s during \(timeoutPhase.label.lowercased())", replayed: used)
+                return used
+            case .cancelled:
+                return used
+            case .success(let bundleOpt):
+                guard let bundle = bundleOpt else { return used }
+                resolution = bundle.resolution
+                rawSnapshot = bundle.snapshot
+                observation = bundle.observation
+            }
+
             guard case .ready(let action, let healNote, let healedTarget) = resolution else {
                 if case .stop(let why) = resolution {
                     stopReplay(at: entryIndex, move: offset + 1, reason: why, replayed: used)
@@ -1475,7 +1790,7 @@ final class AgentViewModel {
                 result: nil,
                 status: move.isCommitting ? .proposed : .executed,
                 snapshot: annotated,
-                pageMap: observation?.mapText
+                pageMap: lastObservation?.mapText
             )
             step.isReplayed = true
             step.wasHealed = healNote != nil
@@ -1512,7 +1827,26 @@ final class AgentViewModel {
             currentStepIndex = used
 
             phase = .acting
-            let resultText = await execute(action).result
+            let partBOutcome = await runBoundedSegment(timeout: stepDeadlineDuration) { [weak self] () -> String? in
+                guard let self = self else { return nil }
+                return await self.execute(action).result
+            }
+
+            let resultText: String
+            switch partBOutcome {
+            case .timedOut(let timeoutPhase):
+                AppLog.loop.warning("Saved-replay move \(offset + 1, privacy: .public) timed out after \(Int(self.stepDeadlineDuration), privacy: .public)s: phase=\(timeoutPhase.label, privacy: .public)")
+                steps[steps.count - 1].status = .failed
+                steps[steps.count - 1].result = "js error: timed out during acting"
+                stopReplay(at: entryIndex, move: offset + 1, reason: "replayed move timed out after \(Int(self.stepDeadlineDuration))s during acting", replayed: used)
+                return used
+            case .cancelled:
+                return used
+            case .success(let res):
+                guard let res else { return used }
+                resultText = res
+            }
+
             steps[steps.count - 1].result = resultText
             lastResultLine = resultText
             recordExecutedMove(action, fingerprint: step.targetFingerprint, result: resultText)
@@ -1960,8 +2294,7 @@ final class AgentViewModel {
                 id: pair.match.id,
                 value: pair.value,
                 expectedName: lastObservation?.element(withID: pair.match.id)?.name ?? pair.match.probe.label,
-                isSelect: pair.match.probe.widget == .select,
-                kind: pair.match.kind
+                isSelect: pair.match.probe.widget == .select
             )
         }
 
@@ -2406,6 +2739,21 @@ final class AgentViewModel {
     // MARK: - Acting
 
     private func execute(_ action: AgentAction) async -> (result: String, extracted: String?) {
+        var outcome = await performAction(action)
+        if webProxy.consumeContentProcessTermination() {
+            let note = "web process terminated (jetsam) — page reloaded"
+            outcome.result = outcome.result.isEmpty ? note : "\(outcome.result) · \(note)"
+        }
+        if let refusal = webProxy.consumeLastNavigationRefusal() {
+            outcome.result = outcome.result.isEmpty ? refusal : "\(outcome.result) · \(refusal)"
+        }
+        if let dialog = webProxy.consumeLastDialogNotice() {
+            outcome.result = outcome.result.isEmpty ? "dialog: \(dialog)" : "\(outcome.result) · dialog: \(dialog)"
+        }
+        return outcome
+    }
+
+    private func performAction(_ action: AgentAction) async -> (result: String, extracted: String?) {
         switch action.kind {
         case .tapElement:
             guard let elementID = action.element else {
@@ -2632,6 +2980,9 @@ final class AgentViewModel {
     }
 
     private func finishRun(_ outcome: RunOutcome, _ message: String, goal: String) {
+        guard !didFinishRun else { return }
+        didFinishRun = true
+        AppLog.loop.info("Lifecycle finishRun: outcome=\(outcome.rawValue, privacy: .public)")
         phase = .idle
         onDevice.coolDown()
         resumeApproval(false)
@@ -2675,7 +3026,7 @@ final class AgentViewModel {
         let model = step.modelChoice?.rawValue ?? "unknown"
         let reason = step.routingReason ?? "none"
         let result = step.result ?? ""
-        AppLog.loop.info("Step \(step.index, privacy: .public): kind=\(step.action.kind.rawValue, privacy: .public), element=\(elementName, privacy: .private), model=\(model, privacy: .public), reason=\(reason, privacy: .public), result=\(result, privacy: .private), duration=\(String(format: "%.2fs", duration), privacy: .public)")
+        AppLog.loop.info("Step \(step.index, privacy: .public): kind=\(step.action.kind.rawValue, privacy: .public), element=\(elementName, privacy: .private), model=\(model, privacy: .public), reason=\(reason, privacy: .private), result=\(result, privacy: .private), duration=\(String(format: "%.2fs", duration), privacy: .public)")
     }
 
     /// Writes the attempt back onto the saved replay it came from: how many times
@@ -2690,8 +3041,29 @@ final class AgentViewModel {
     // MARK: - Approval plumbing
 
     private func waitForApproval() async -> Bool {
-        await withCheckedContinuation { continuation in
-            approvalContinuation = continuation
+        if approvalContinuation != nil {
+            AppLog.loop.warning("Lifecycle: overwriting existing approval continuation; auto-rejecting previous wait")
+            resumeApproval(false)
+        }
+
+        guard !Task.isCancelled else {
+            AppLog.loop.info("Lifecycle: approval requested on cancelled task; returning false")
+            return false
+        }
+
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if Task.isCancelled {
+                    continuation.resume(returning: false)
+                } else {
+                    approvalContinuation = continuation
+                }
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                AppLog.loop.info("Lifecycle: approval wait cancelled; resolving with false")
+                self?.resumeApproval(false)
+            }
         }
     }
 

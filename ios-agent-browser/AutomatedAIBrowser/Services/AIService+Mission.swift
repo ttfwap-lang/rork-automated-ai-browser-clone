@@ -133,7 +133,7 @@ extension AIService {
 
     /// Writes the opening mission checklist. Throws on any failure — the caller
     /// falls back to a single-task plan so a run can never be blocked by this.
-    func plan(_ request: PlanRequest) async throws -> MissionPlan {
+    func plan(_ request: PlanRequest, onRetry: (@Sendable (Int) -> Void)? = nil) async throws -> MissionPlan {
         var lines = ["USER'S GOAL: \(request.goal)"]
         if let refinement = request.refinement {
             lines.append(refinement.briefingLine)
@@ -161,7 +161,8 @@ extension AIService {
             parts: [.text(context)],
             tools: [Self.writePlanTool],
             maxTokens: 900,
-            temperature: 0.3
+            temperature: 0.3,
+            onRetry: onRetry
         )
 
         guard let call = message.toolCalls?.first,
@@ -193,7 +194,7 @@ extension AIService {
     /// Judges a claimed success against a fresh look at the page. Throws when the
     /// check itself cannot run — the caller then reports the run as unconfirmed
     /// rather than silently green.
-    func verify(_ request: VerifyRequest) async throws -> VerificationResult {
+    func verify(_ request: VerifyRequest, onRetry: (@Sendable (Int) -> Void)? = nil) async throws -> VerificationResult {
         var lines: [String] = []
         lines.append("THE USER ASKED FOR: \(request.goal)")
         lines.append("")
@@ -231,7 +232,8 @@ extension AIService {
             parts: parts,
             tools: [Self.reportVerdictTool],
             maxTokens: 700,
-            temperature: 0.0
+            temperature: 0.0,
+            onRetry: onRetry
         )
 
         guard let call = message.toolCalls?.first,

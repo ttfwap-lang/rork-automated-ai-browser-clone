@@ -71,10 +71,21 @@ final class HistoryStore {
         // NOTE: These disk writes are currently synchronous on the main actor
         // (finding LAT-06, scheduled for Stage 2.6). Observe latency here, do not fix it.
         let start = Date()
-        guard let data = try? JSONEncoder().encode(runs) else { return }
-        try? data.write(to: fileURL, options: .atomic)
-        let elapsed = Date().timeIntervalSince(start)
-        AppLog.persistence.info("Saved runs to disk: count=\(self.runs.count, privacy: .public), elapsed=\(String(format: "%.4fs", elapsed), privacy: .public)")
+        let data: Data
+        do {
+            data = try JSONEncoder().encode(runs)
+        } catch {
+            AppLog.persistence.error("Failed to encode history runs: error=\(error.localizedDescription, privacy: .private)")
+            return
+        }
+
+        do {
+            try data.write(to: fileURL, options: .atomic)
+            let elapsed = Date().timeIntervalSince(start)
+            AppLog.persistence.info("Saved runs to disk: count=\(self.runs.count, privacy: .public), elapsed=\(String(format: "%.4fs", elapsed), privacy: .public)")
+        } catch {
+            AppLog.persistence.error("Failed to write history runs to disk: error=\(error.localizedDescription, privacy: .private)")
+        }
     }
 
     private func removeThumbnails(_ run: AgentRun) {

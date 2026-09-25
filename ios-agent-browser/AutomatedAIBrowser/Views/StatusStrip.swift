@@ -23,6 +23,23 @@ struct StatusStrip: View {
                 .contentTransition(.numericText())
                 .animation(.snappy, value: agent.currentStepIndex)
 
+            if agent.phase != .idle {
+                Rectangle()
+                    .fill(Theme.line)
+                    .frame(width: 1, height: 12)
+
+                TimelineView(.periodic(from: .now, by: 1.0)) { _ in
+                    HStack(spacing: 4) {
+                        Image(systemName: "clock")
+                            .font(.system(size: 8, weight: .bold))
+                        Text("\(agent.formattedElapsedTime) / 10m")
+                            .techLabel(9)
+                            .contentTransition(.numericText())
+                    }
+                    .foregroundStyle(Theme.textSecondary)
+                }
+            }
+
             Rectangle()
                 .fill(Theme.line)
                 .frame(width: 1, height: 12)

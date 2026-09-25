@@ -48,6 +48,16 @@ struct AutomatedAIBrowserTests {
         #expect(AIService.decision(fromToolNamed: "self_destruct", argumentsJSON: "{}") == nil)
     }
 
+    @Test func legacyJSONRejectsNonCallableTool() {
+        // AI-05: Non-callable action kind (e.g. verify) rejected via isModelCallable allow-list
+        let nonCallableJSON = #"{"reasoning":"checking","action":{"type":"verify"}}"#
+        #expect(AIService.parseDecision(from: nonCallableJSON) == nil)
+
+        let callableJSON = #"{"reasoning":"tapping","action":{"type":"tap_element","element":5}}"#
+        let decision = AIService.parseDecision(from: callableJSON)
+        #expect(decision?.action.kind == .tapElement)
+    }
+
     // MARK: - Pair 2 tool-call parsing (pro hands + whole-page sight)
 
     @Test func selectOptionToolCallParses() {
@@ -710,16 +720,20 @@ struct AutomatedAIBrowserTests {
         #expect(candidates[1].action.direction == "down")
     }
 
-    @Test func shortlistDropsTerminalMovesAndAcceptsFractionalConfidence() {
+    @Test func shortlistDropsTerminalMovesAndNormalizesConfidenceUnconditionally() {
+        // AI-06: Confidence is declared 0-100 and normalized unconditionally.
+        // Boundary value 1 is treated as 1% (0.01), never 100% (1.0).
         let turn = AIService.turn(
             fromToolNamed: "weigh_options",
-            argumentsJSON: #"{"reasoning":"x","candidates":[{"move":"done","rationale":"finish","confidence":90},{"move":"tap_element","element":3,"rationale":"press it","confidence":0.8}]}"#
+            argumentsJSON: #"{"reasoning":"x","candidates":[{"move":"done","rationale":"finish","confidence":90},{"move":"tap_element","element":3,"rationale":"press it","confidence":80},{"move":"scroll","direction":"down","rationale":"scroll down","confidence":1}]}"#
         )
         var candidates: [MoveCandidate] = []
         if case .shortlist(_, let list)? = turn { candidates = list }
-        #expect(candidates.count == 1)
+        #expect(candidates.count == 2)
         #expect(candidates[0].action.kind == .tapElement)
         #expect(abs(candidates[0].confidence - 0.8) < 0.001)
+        #expect(candidates[1].action.kind == .scroll)
+        #expect(abs(candidates[1].confidence - 0.01) < 0.001)
     }
 
     @Test func anEmptyShortlistIsRejectedSoTheAppCanRetry() {

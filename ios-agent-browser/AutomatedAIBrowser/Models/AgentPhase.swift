@@ -15,6 +15,8 @@ enum AgentPhase: Equatable {
     case replaying
     /// Working out what a form is asking for, on the device, for nothing.
     case matching
+    /// Transient network error — retrying request.
+    case retrying(attempt: Int)
 
     var label: String {
         switch self {
@@ -28,6 +30,7 @@ enum AgentPhase: Equatable {
         case .remembering: "REMEMBERING"
         case .replaying: "REPLAYING"
         case .matching: "MATCHING"
+        case .retrying(let attempt): "RETRYING (\(attempt)/3)"
         }
     }
 
@@ -42,6 +45,7 @@ enum AgentPhase: Equatable {
         case .remembering: Theme.cyan
         case .replaying: Theme.amber
         case .matching: Theme.cyan
+        case .retrying: Theme.amber
         }
     }
 
@@ -55,6 +59,7 @@ enum AgentPhase: Equatable {
         case .remembering: "WRITING DOWN THE ROUTE THAT WORKED…"
         case .replaying: "REPLAYING YOUR SAVED ROUTE…"
         case .matching: "READING THIS FORM AGAINST YOUR DOSSIER — FREE, ON YOUR IPHONE…"
+        case .retrying(let attempt): "NETWORK RETRY (\(attempt)/3)…"
         default: "WORKING…"
         }
     }
@@ -62,7 +67,7 @@ enum AgentPhase: Equatable {
     /// True while the agent is looking or reasoning — drives the scanning border.
     var isBusyThinking: Bool {
         switch self {
-        case .planning, .observing, .thinking, .verifying, .remembering, .replaying, .matching: true
+        case .planning, .observing, .thinking, .verifying, .remembering, .replaying, .matching, .retrying: true
         case .idle, .awaitingApproval, .acting: false
         }
     }

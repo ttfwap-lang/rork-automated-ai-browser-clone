@@ -476,7 +476,8 @@ nonisolated struct AIService {
                             "x": .integer("Coordinate x 0-1000, for the last-resort tap.", min: 0, max: 1000),
                             "y": .integer("Coordinate y 0-1000, for the last-resort tap.", min: 0, max: 1000),
                             "rationale": .string("One line: why this option might be the right move."),
-                            "confidence": .integer("How confident you are in this option, 0-100.", min: 0, max: 100),
+                            // Stage 1a.8 (AI-06): Confidence scale declared 0-100 integer explicitly.
+                            "confidence": .integer("How confident you are in this option as an integer from 0 to 100 (e.g. 70 for 70%, 1 for 1%).", min: 0, max: 100),
                         ],
                         required: ["move", "rationale", "confidence"]
                     ),
@@ -586,9 +587,9 @@ nonisolated struct AIService {
 
     /// Asks the model for the next turn via native tool calling; retries once
     /// if the reply contains neither a valid tool call nor parseable JSON.
-    func decide(_ request: DecisionRequest) async throws -> AgentTurn {
+    func decide(_ request: DecisionRequest, onRetry: (@Sendable (Int) -> Void)? = nil) async throws -> AgentTurn {
         for attempt in 1...2 {
-            let message = try await complete(request, strict: attempt > 1)
+            let message = try await complete(request, strict: attempt > 1, onRetry: onRetry)
             if let call = message.toolCalls?.first,
                let function = call.function,
                let turn = Self.turn(fromToolNamed: function.name, argumentsJSON: function.arguments ?? "") {
@@ -600,12 +601,20 @@ nonisolated struct AIService {
             }
             try Task.checkCancellation()
         }
-        throw AIError.unparseable
+        // Stage 1a.8 (AI-03): Exhausted retries degrade to a safe recovery move (extract) rather than throwing and killing the run.
+        AppLog.ai.warning("AI decision unparseable after 2 attempts: degrading to safe recovery move (extract)")
+        var recoveryAction = AgentAction(type: AgentActionKind.extract.rawValue)
+        recoveryAction.reasoning = "Unparseable AI reply after 2 attempts; extracting page text as safe recovery move"
+        let recoveryDecision = AgentDecision(
+            reasoning: "The model gave an unparseable response twice. Recovering safely by extracting page text to clarify state.",
+            action: recoveryAction
+        )
+        return .move(recoveryDecision)
     }
 
     // MARK: - Networking
 
-    private func complete(_ request: DecisionRequest, strict: Bool) async throws -> ChatResponse.Message {
+    private func complete(_ request: DecisionRequest, strict: Bool, onRetry: (@Sendable (Int) -> Void)? = nil) async throws -> ChatResponse.Message {
         var system = Self.systemPrompt
         if strict {
             system += "\n\nIMPORTANT: Your previous reply did not include a valid tool call. You MUST respond by calling exactly ONE of the provided tools — no prose."
@@ -613,9 +622,12 @@ nonisolated struct AIService {
 
         var parts: [ChatContentPart] = [
             .text(Self.contextText(for: request)),
-            .imageJPEG(base64: request.imageBase64),
         ]
-        if let overview = request.overviewImageBase64, !overview.isEmpty {
+        // Stage 1a.8 (AI-03): Attempt 2 (strict) sends text only without re-uploading multi-megabyte images
+        if !strict && !request.imageBase64.isEmpty {
+            parts.append(.imageJPEG(base64: request.imageBase64))
+        }
+        if !strict, let overview = request.overviewImageBase64, !overview.isEmpty {
             parts.append(.text("SECOND IMAGE — the whole-page overview you requested (\(request.overviewNote ?? "stitched screens")). It has NO badges: use it for orientation only, never to pick tap targets."))
             parts.append(.imageJPEG(base64: overview))
         }
@@ -629,8 +641,114 @@ nonisolated struct AIService {
                 hasBookmarks: request.hasBookmarks,
                 allowShortlist: request.allowShortlist,
                 hasDossier: request.hasDossier
-            )
+            ),
+            onRetry: onRetry
         )
+    }
+
+    nonisolated struct AIResponseError: Error {
+        let underlying: Error
+        let response: HTTPURLResponse?
+    }
+
+    /// Classifies network and HTTP errors as retryable or terminal, and extracts Retry-After if present.
+    nonisolated static func isRetryable(error: Error, response: HTTPURLResponse?) -> (retryable: Bool, retryAfter: TimeInterval?) {
+        if Task.isCancelled || (error as? URLError)?.code == .cancelled {
+            return (false, nil)
+        }
+
+        if let http = response {
+            let status = http.statusCode
+            let retryAfter = parseRetryAfter(from: http)
+            if status == 408 || status == 429 || (500...599).contains(status) {
+                return (true, retryAfter)
+            }
+            if status == 401 || status == 402 || status == 403 {
+                return (false, nil)
+            }
+            if (400..<500).contains(status) {
+                return (false, nil)
+            }
+        }
+
+        if let urlError = error as? URLError {
+            if urlError.code == .cancelled {
+                return (false, nil)
+            }
+            return (true, nil)
+        }
+
+        if let aiError = error as? AIError {
+            switch aiError {
+            case .rateLimited:
+                return (true, response.flatMap { parseRetryAfter(from: $0) })
+            case .server(let code) where (500...599).contains(code) || code == 408:
+                return (true, response.flatMap { parseRetryAfter(from: $0) })
+            default:
+                return (false, nil)
+            }
+        }
+
+        return (false, nil)
+    }
+
+    nonisolated static func parseRetryAfter(from response: HTTPURLResponse) -> TimeInterval? {
+        guard let raw = response.value(forHTTPHeaderField: "Retry-After")?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else {
+            return nil
+        }
+        if let seconds = Double(raw), seconds >= 0 {
+            return seconds
+        }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
+        if let date = formatter.date(from: raw) {
+            let diff = date.timeIntervalSinceNow
+            return max(0, diff)
+        }
+        return nil
+    }
+
+    private func sendSingleRequest(
+        urlRequest: URLRequest,
+        model: String,
+        bodyBytes: Int,
+        attempt: Int
+    ) async throws -> (Data, HTTPURLResponse) {
+        let start = Date()
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await URLSession.shared.data(for: urlRequest)
+        } catch {
+            let elapsed = Date().timeIntervalSince(start)
+            AppLog.ai.error("AI network failed: model=\(model, privacy: .public), elapsed=\(String(format: "%.2fs", elapsed), privacy: .public), bodyBytes=\(bodyBytes, privacy: .public), attempt=\(attempt, privacy: .public), error=\(error.localizedDescription, privacy: .private)")
+            throw AIResponseError(underlying: error, response: nil)
+        }
+
+        let elapsed = Date().timeIntervalSince(start)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            let err = AIError.server(0)
+            AppLog.ai.error("AI network failed: non-HTTP response, elapsed=\(String(format: "%.2fs", elapsed), privacy: .public), attempt=\(attempt, privacy: .public)")
+            throw AIResponseError(underlying: err, response: nil)
+        }
+
+        let status = httpResponse.statusCode
+        AppLog.ai.info("AI network: model=\(model, privacy: .public), status=\(status, privacy: .public), elapsed=\(String(format: "%.2fs", elapsed), privacy: .public), bodyBytes=\(bodyBytes, privacy: .public), attempt=\(attempt, privacy: .public)")
+
+        if (200..<300).contains(status) {
+            return (data, httpResponse)
+        }
+
+        let mappedError: Error
+        switch status {
+        case 401, 403: mappedError = AIError.auth
+        case 402: mappedError = AIError.balance
+        case 408, 429: mappedError = AIError.rateLimited
+        default: mappedError = AIError.server(status)
+        }
+        throw AIResponseError(underlying: mappedError, response: httpResponse)
     }
 
     /// Shared transport for every AI call the app makes — step decisions, mission
@@ -643,7 +761,8 @@ nonisolated struct AIService {
         tools: [ToolDefinition],
         maxTokens: Int = 1000,
         temperature: Double = 0.2,
-        attempt: Int = 1
+        attempt: Int = 1,
+        onRetry: (@Sendable (Int) -> Void)? = nil
     ) async throws -> ChatResponse.Message {
         var base = Config.EXPO_PUBLIC_TOOLKIT_URL
         let key = Config.EXPO_PUBLIC_RORK_TOOLKIT_SECRET_KEY
@@ -666,45 +785,90 @@ nonisolated struct AIService {
 
         var urlRequest = URLRequest(url: url)
         urlRequest.httpMethod = "POST"
-        urlRequest.timeoutInterval = 120
+        urlRequest.timeoutInterval = 45
         urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
         urlRequest.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         let encodedBody = try JSONEncoder().encode(body)
         urlRequest.httpBody = encodedBody
         let bodyBytes = encodedBody.count
 
-        let start = Date()
-        let (data, response): (Data, URLResponse)
-        do {
-            (data, response) = try await URLSession.shared.data(for: urlRequest)
-        } catch {
-            let elapsed = Date().timeIntervalSince(start)
-            AppLog.ai.error("AI network failed: model=\(model, privacy: .public), elapsed=\(String(format: "%.2fs", elapsed), privacy: .public), bodyBytes=\(bodyBytes, privacy: .public), attempt=\(attempt, privacy: .public), error=\(error.localizedDescription, privacy: .public)")
-            throw error
-        }
+        let maxAttempts = 3
+        let retryWallBudget: TimeInterval = 30.0
+        let baseBackoffs: [TimeInterval] = [1.0, 4.0, 12.0]
+        let wallStart = Date()
 
-        let elapsed = Date().timeIntervalSince(start)
-        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-        AppLog.ai.info("AI network: model=\(model, privacy: .public), status=\(status, privacy: .public), elapsed=\(String(format: "%.2fs", elapsed), privacy: .public), bodyBytes=\(bodyBytes, privacy: .public), attempt=\(attempt, privacy: .public)")
+        var currentAttempt = attempt
+        while true {
+            try Task.checkCancellation()
 
-        switch status {
-        case 200..<300: break
-        case 401, 403: throw AIError.auth
-        case 402: throw AIError.balance
-        case 408, 429: throw AIError.rateLimited
-        default: throw AIError.server(status)
-        }
+            do {
+                let (data, _) = try await sendSingleRequest(
+                    urlRequest: urlRequest,
+                    model: model,
+                    bodyBytes: bodyBytes,
+                    attempt: currentAttempt
+                )
 
-        let decoded = try JSONDecoder().decode(ChatResponse.self, from: data)
-        guard let message = decoded.choices.first?.message else {
-            throw AIError.emptyResponse
+                let decoded = try JSONDecoder().decode(ChatResponse.self, from: data)
+                guard let message = decoded.choices.first?.message else {
+                    throw AIError.emptyResponse
+                }
+                let hasToolCall = !(message.toolCalls ?? []).isEmpty
+                let hasContent = !(message.content ?? "").isEmpty
+                guard hasToolCall || hasContent else {
+                    throw AIError.emptyResponse
+                }
+                return message
+            } catch {
+                try Task.checkCancellation()
+
+                let underlyingError: Error
+                let httpResponse: HTTPURLResponse?
+                if let responseError = error as? AIResponseError {
+                    underlyingError = responseError.underlying
+                    httpResponse = responseError.response
+                } else {
+                    underlyingError = error
+                    httpResponse = nil
+                }
+
+                let (retryable, retryAfter) = Self.isRetryable(error: underlyingError, response: httpResponse)
+
+                guard retryable else {
+                    AppLog.ai.error("AI network terminal error: model=\(model, privacy: .public), attempt=\(currentAttempt, privacy: .public), error=\(underlyingError.localizedDescription, privacy: .private)")
+                    throw underlyingError
+                }
+
+                guard currentAttempt < maxAttempts else {
+                    AppLog.ai.error("AI network retries exhausted: model=\(model, privacy: .public), attempts=\(currentAttempt, privacy: .public)/\(maxAttempts, privacy: .public), error=\(underlyingError.localizedDescription, privacy: .private)")
+                    throw underlyingError
+                }
+
+                let baseDelay = baseBackoffs[min(currentAttempt - 1, baseBackoffs.count - 1)]
+                let calculatedDelay: TimeInterval
+                if let headerDelay = retryAfter {
+                    calculatedDelay = headerDelay
+                } else {
+                    let jitter = Double.random(in: 0.75...1.25)
+                    calculatedDelay = baseDelay * jitter
+                }
+
+                let wallElapsed = Date().timeIntervalSince(wallStart)
+                if wallElapsed + calculatedDelay > retryWallBudget {
+                    AppLog.ai.error("AI network retry wall budget exceeded: elapsed=\(String(format: "%.2fs", wallElapsed), privacy: .public), delay=\(String(format: "%.2fs", calculatedDelay), privacy: .public), budget=\(retryWallBudget, privacy: .public)")
+                    throw underlyingError
+                }
+
+                let nextAttempt = currentAttempt + 1
+                AppLog.ai.warning("AI network retry scheduled: model=\(model, privacy: .public), nextAttempt=\(nextAttempt, privacy: .public)/\(maxAttempts, privacy: .public), delay=\(String(format: "%.2fs", calculatedDelay), privacy: .public), reason=\(underlyingError.localizedDescription, privacy: .private)")
+
+                onRetry?(nextAttempt)
+
+                try await Task.sleep(nanoseconds: UInt64(calculatedDelay * 1_000_000_000))
+
+                currentAttempt = nextAttempt
+            }
         }
-        let hasToolCall = !(message.toolCalls ?? []).isEmpty
-        let hasContent = !(message.content ?? "").isEmpty
-        guard hasToolCall || hasContent else {
-            throw AIError.emptyResponse
-        }
-        return message
     }
 
     // MARK: - Parsing
@@ -780,7 +944,9 @@ nonisolated struct AIService {
             action.completedTasks = args.completedTasks
 
             let reported = draft.confidence ?? 50
-            let confidence = reported <= 1 ? reported : reported / 100
+            // Stage 1a.8 (AI-06): Normalize unconditionally on 0-100 integer scale.
+            // Boundary value 1 is treated as 1% (0.01), never 100% (1.0).
+            let confidence = Double(reported) / 100.0
             return MoveCandidate(
                 action: action,
                 rationale: draft.rationale?.trimmed ?? "",
@@ -846,8 +1012,15 @@ nonisolated struct AIService {
             return nil
         }
         let jsonSlice = String(trimmed[start...end])
-        guard let data = jsonSlice.data(using: .utf8) else { return nil }
-        return try? JSONDecoder().decode(AgentDecision.self, from: data)
+        guard let data = jsonSlice.data(using: .utf8),
+              let decision = try? JSONDecoder().decode(AgentDecision.self, from: data)
+        else { return nil }
+        // Stage 1a.8 (AI-05): Enforce isModelCallable allow-list on legacy JSON path.
+        guard decision.action.kind.isModelCallable else {
+            AppLog.ai.warning("parseDecision rejected non-callable action: \(decision.action.kind.rawValue, privacy: .public)")
+            return nil
+        }
+        return decision
     }
 
     // MARK: - Prompting
@@ -926,7 +1099,15 @@ nonisolated struct AIService {
             lines.append(extracted)
         }
         lines.append("")
-        if let map = request.pageMap, !map.isEmpty {
+        if request.imageBase64.isEmpty {
+            lines.append("SCREENSHOT UNAVAILABLE THIS STEP — page capture returned nil (layout zero bounds or web process reload). Work from the page text / URL / history.")
+            if let map = request.pageMap, !map.isEmpty {
+                lines.append(map)
+                lines.append("Interactive elements from previous scan are listed above. Decide the next action and call the matching tool.")
+            } else {
+                lines.append("PAGE SCAN ALSO UNAVAILABLE — decide the single next action from history, URL, or navigation.")
+            }
+        } else if let map = request.pageMap, !map.isEmpty {
             lines.append(map)
             lines.append("")
             if request.overviewImageBase64 != nil {

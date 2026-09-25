@@ -78,7 +78,7 @@ struct LiveThinkingPanel: View {
 
             Spacer(minLength: 0)
 
-            Text("STEP \(agent.currentStepIndex)/\(agent.maxStepsThisRun)")
+            Text("STEP \(agent.currentStepIndex)/\(agent.maxStepsThisRun) · MAX 90s")
                 .techLabel(9)
                 .foregroundStyle(Theme.textSecondary)
                 .contentTransition(.numericText())
