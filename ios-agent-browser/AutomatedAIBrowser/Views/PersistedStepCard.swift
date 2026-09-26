@@ -16,6 +16,7 @@ struct PersistedStepCard: View {
             if step.kind == .revisePlan { return Theme.violet }
             if step.kind == .headStart || step.kind == .replay { return Theme.amber }
             return Theme.cyan
+        case .failed: return Theme.red
         case .terminal: return step.kind == .fail ? Theme.red : Theme.green
         }
     }

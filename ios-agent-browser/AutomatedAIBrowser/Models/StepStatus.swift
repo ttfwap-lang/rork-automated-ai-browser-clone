@@ -5,6 +5,7 @@ nonisolated enum StepStatus: String, Codable {
     case proposed
     case rejected
     case executed
+    case failed
     case terminal
 
     var label: String {
@@ -12,6 +13,7 @@ nonisolated enum StepStatus: String, Codable {
         case .proposed: "PROPOSED"
         case .rejected: "REJECTED"
         case .executed: "OK"
+        case .failed: "FAILED"
         case .terminal: "END"
         }
     }

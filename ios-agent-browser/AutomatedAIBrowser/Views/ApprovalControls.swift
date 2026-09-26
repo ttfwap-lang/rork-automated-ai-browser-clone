@@ -23,6 +23,30 @@ struct ApprovalControls: View {
                     Spacer(minLength: 0)
                 }
 
+                if let external = step.action.externalApprovalSummary {
+                    Label(external, systemImage: "lock.shield")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(Theme.amber)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                if let requestPreview = step.action.externalRequestPreview,
+                   step.action.kind == .runPlugin {
+                    DisclosureGroup("Review complete bounded external request") {
+                        ScrollView {
+                            Text(requestPreview)
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundStyle(Theme.textSecondary)
+                                .textSelection(.enabled)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .padding(.top, 6)
+                        }
+                        .frame(maxHeight: 280)
+                    }
+                    .font(.system(size: 11, weight: .semibold))
+                    .tint(Theme.amber)
+                }
+
                 if showReasoning && !step.reasoning.isEmpty {
                     Text(step.reasoning)
                         .font(.system(size: 12))

@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// Where the agent currently is inside its plan-see-decide-act-verify loop.
-enum AgentPhase: Equatable {
+nonisolated enum AgentPhase: Equatable, Sendable {
     case idle
     case planning
     case observing
@@ -34,21 +34,6 @@ enum AgentPhase: Equatable {
         }
     }
 
-    var color: Color {
-        switch self {
-        case .idle: Theme.textSecondary
-        case .planning: Theme.violet
-        case .observing, .thinking: Theme.cyan
-        case .awaitingApproval: Theme.amber
-        case .acting: Theme.green
-        case .verifying: Theme.violet
-        case .remembering: Theme.cyan
-        case .replaying: Theme.amber
-        case .matching: Theme.cyan
-        case .retrying: Theme.amber
-        }
-    }
-
     /// Line shown in the mission log while the agent is busy but has nothing to show yet.
     var activityLine: String {
         switch self {
@@ -69,6 +54,23 @@ enum AgentPhase: Equatable {
         switch self {
         case .planning, .observing, .thinking, .verifying, .remembering, .replaying, .matching, .retrying: true
         case .idle, .awaitingApproval, .acting: false
+        }
+    }
+}
+
+extension AgentPhase {
+    @MainActor var color: Color {
+        switch self {
+        case .idle: Theme.textSecondary
+        case .planning: Theme.violet
+        case .observing, .thinking: Theme.cyan
+        case .awaitingApproval: Theme.amber
+        case .acting: Theme.green
+        case .verifying: Theme.violet
+        case .remembering: Theme.cyan
+        case .replaying: Theme.amber
+        case .matching: Theme.cyan
+        case .retrying: Theme.amber
         }
     }
 }

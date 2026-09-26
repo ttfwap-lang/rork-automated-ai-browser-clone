@@ -321,6 +321,17 @@ final class WebViewProxy: NSObject, WKNavigationDelegate, WKUIDelegate {
         await runJS(PageReader.readScript)
     }
 
+    /// Absolute links currently rendered in the main document, bounded and
+    /// de-duplicated by the page script. This is the local half of Crawl4AI's
+    /// breadth-first discovery workflow; the remote crawler does the fetching.
+    func discoverLinks(limit: Int = 30, sameOrigin: Bool = true) async -> [String] {
+        let raw = await runJS(PageReader.linkDiscoveryScript(maxCount: limit, sameOrigin: sameOrigin))
+        guard let data = raw.data(using: .utf8),
+              let links = try? JSONDecoder().decode([String].self, from: data)
+        else { return [] }
+        return Array(links.prefix(min(max(limit, 1), 100)))
+    }
+
     // MARK: - JS plumbing
 
     /// Runs a script in the main frame or, when `frame` is given, inside that

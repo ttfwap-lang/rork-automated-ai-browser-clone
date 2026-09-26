@@ -9,6 +9,7 @@ struct AutomatedAIBrowserApp: App {
     @State private var lessonBook: LessonBook
     @State private var routines: RoutineStore
     @State private var dossier: Dossier
+    @State private var plugins: PluginManager
     @State private var agent: AgentViewModel
 
     init() {
@@ -19,6 +20,7 @@ struct AutomatedAIBrowserApp: App {
         let lessonBook = LessonBook()
         let routines = RoutineStore()
         let dossier = Dossier()
+        let plugins = PluginManager()
         _settings = State(initialValue: settings)
         _historyStore = State(initialValue: historyStore)
         _onDevice = State(initialValue: onDevice)
@@ -26,6 +28,7 @@ struct AutomatedAIBrowserApp: App {
         _lessonBook = State(initialValue: lessonBook)
         _routines = State(initialValue: routines)
         _dossier = State(initialValue: dossier)
+        _plugins = State(initialValue: plugins)
         _agent = State(initialValue: AgentViewModel(
             settings: settings,
             history: historyStore,
@@ -33,7 +36,8 @@ struct AutomatedAIBrowserApp: App {
             vault: vault,
             lessons: lessonBook,
             routines: routines,
-            dossier: dossier
+            dossier: dossier,
+            plugins: plugins
         ))
     }
 
@@ -47,6 +51,7 @@ struct AutomatedAIBrowserApp: App {
                 .environment(lessonBook)
                 .environment(routines)
                 .environment(dossier)
+                .environment(plugins)
                 .environment(agent)
                 .preferredColorScheme(.dark)
                 .tint(Theme.cyan)

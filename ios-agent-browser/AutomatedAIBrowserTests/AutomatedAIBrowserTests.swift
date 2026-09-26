@@ -3259,4 +3259,400 @@ struct AutomatedAIBrowserTests {
         #expect(note?.contains("couldn't read the leftover labels") == true)
         #expect(note?.contains("5 labels are the agent's") == true)
     }
+
+    // MARK: - BrowserAct and Crawl4AI plugin adapters
+
+    @Test func browserActV3ToolCallParsesWithoutUsingLegacyWorkflowFields() {
+        let decision = AIService.decision(
+            fromToolNamed: "browseract",
+            argumentsJSON: #"{"reasoning":"Run the published Bot.","operation":"run_bot","identifier":"1001","input_parameters":[{"name":"url","value":"https://example.com/orders/42"}],"wait_seconds":30}"#
+        )
+        #expect(decision?.action.kind == .runPlugin)
+        #expect(decision?.action.plugin == BrowserPluginID.browserAct.rawValue)
+        #expect(decision?.action.operation == "run_bot")
+        #expect(decision?.action.identifier == "1001")
+        #expect(decision?.action.inputParameters?.first?.name == "url")
+        #expect(decision?.action.waitSeconds == 30)
+        #expect(decision?.action.requiresUserApproval)
+        #expect(BrowserActOperation.allCases.map(\.rawValue).contains("run_workflow") == false)
+        #expect(BrowserActOperation.allCases.map(\.rawValue).contains("cancel_task"))
+    }
+
+    @Test func crawl4AIPluginCallCarriesTheMaximumCompatiblePayload() {
+        let decision = AIService.decision(
+            fromToolNamed: "crawl4ai",
+            argumentsJSON: #"{"reasoning":"Extract the public product records.","operation":"structured_extract","url":"https://example.com/products","instruction":"Return every product","json_schema":"{\"type\":\"array\"}","example":"{\"type\":\"object\"}","parse_all":true,"wait_for_images":true,"same_origin":true,"depth":2,"max_pages":20,"limit":25,"temperature":0.1}"#
+        )
+        #expect(decision?.action.kind == .runPlugin)
+        #expect(decision?.action.plugin == BrowserPluginID.crawl4AI.rawValue)
+        #expect(decision?.action.operation == "structured_extract")
+        #expect(decision?.action.url == "https://example.com/products")
+        #expect(decision?.action.jsonSchema == #"{"type":"array"}"#)
+        #expect(decision?.action.example == #"{"type":"object"}"#)
+        #expect(decision?.action.parseAll == true)
+        #expect(decision?.action.depth == 2)
+        #expect(decision?.action.maxPages == 20)
+        #expect(decision?.action.requiresUserApproval)
+    }
+
+    @Test func crawl4AIRecipeInputsAndDecimalScreenshotWaitDecode() {
+        let recipe = AIService.decision(
+            fromToolNamed: "crawl4ai",
+            argumentsJSON: #"{"reasoning":"Run the catalog recipe.","operation":"recipe_run","identifier":"hn-hiring","input_parameters":[{"name":"thread","value":"49522897"}],"bypass_cache":true}"#
+        )
+        #expect(recipe?.action.inputParameters?.first?.name == "thread")
+        #expect(recipe?.action.inputParameters?.first?.value == "49522897")
+        #expect(recipe?.action.bypassCache == true)
+
+        let screenshot = AIService.decision(
+            fromToolNamed: "crawl4ai",
+            argumentsJSON: #"{"reasoning":"Capture after fonts settle.","operation":"screenshot","url":"https://example.com","wait_seconds":2.5}"#
+        )
+        #expect(screenshot?.action.waitSeconds == 2.5)
+
+        let arrayExample = AIService.decision(
+            fromToolNamed: "crawl4ai",
+            argumentsJSON: #"{"reasoning":"Extract records.","operation":"structured_extract","url":"https://example.com","instruction":"Extract records","example":"[{\"title\":\"Example\"}]"}"#
+        )
+        #expect(arrayExample?.action.example == #"[{"title":"Example"}]"#)
+    }
+
+    @Test func pluginToolSchemasExposeOnlyTheConfiguredCrawl4AISurface() throws {
+        let serverTools = AIService.tools(
+            hasPlan: false,
+            pluginIDs: [BrowserPluginID.crawl4AI.rawValue],
+            crawl4AIServiceKind: .server
+        )
+        let server = try #require(serverTools.first { $0.function.name == "crawl4ai" })
+        #expect(server.function.parameters.properties["operation"]?.enumValues?.contains("crawl") == true)
+        #expect(server.function.parameters.properties["operation"]?.enumValues?.contains("scrape") == false)
+
+        let cloudTools = AIService.tools(
+            hasPlan: false,
+            pluginIDs: [BrowserPluginID.crawl4AI.rawValue],
+            crawl4AIServiceKind: .cloud
+        )
+        let cloud = try #require(cloudTools.first { $0.function.name == "crawl4ai" })
+        #expect(cloud.function.parameters.properties["operation"]?.enumValues?.contains("scrape") == true)
+        #expect(cloud.function.parameters.properties["operation"]?.enumValues?.contains("execute_js") == false)
+        #expect(cloud.function.parameters.properties["input_parameters"] != nil)
+        #expect(cloud.function.parameters.properties["identifier"] != nil)
+        #expect(cloud.function.parameters.properties["example"] != nil)
+        let browser = try #require(AIService.tools(hasPlan: false, pluginIDs: [BrowserPluginID.browserAct.rawValue])
+            .first { $0.function.name == "browseract" })
+        #expect(browser.function.parameters.properties["configuration"] != nil)
+
+        let disabled = AIService.tools(hasPlan: false)
+        #expect(disabled.contains { $0.function.name == "browseract" || $0.function.name == "crawl4ai" } == false)
+    }
+
+    @Test func everyCrawl4AIOperationIsAssignedToTheRightService() {
+        #expect(Crawl4AIOperation.crawl.serviceKind == .server)
+        #expect(Crawl4AIOperation.executeJS.serviceKind == .server)
+        #expect(Crawl4AIOperation.artifact.serviceKind == .server)
+        #expect(Crawl4AIOperation.scrape.serviceKind == .cloud)
+        #expect(Crawl4AIOperation.structuredExtract.serviceKind == .cloud)
+        #expect(Crawl4AIOperation.recipeRun.serviceKind == .cloud)
+    }
+
+    @Test func externalApprovalSummaryNeverPrintsInputValues() {
+        var action = AgentAction(type: AgentActionKind.runPlugin.rawValue)
+        action.plugin = BrowserPluginID.browserAct.rawValue
+        action.operation = "run_bot"
+        action.inputParameters = [
+            AgentAction.PluginInput(name: "session_cookie", value: "top-secret-cookie"),
+            AgentAction.PluginInput(name: "url", value: "https://example.com"),
+        ]
+        action.url = "https://example.com/account?q=hidden-query"
+        action.scripts = ["document.querySelector('form').submit()"]
+        let summary = action.externalApprovalSummary ?? ""
+        #expect(summary.contains("session_cookie"))
+        #expect(summary.contains("top-secret-cookie") == false)
+        #expect(summary.contains("hidden-query") == false)
+        #expect(summary.contains("values available in the exact-request disclosure"))
+        #expect(summary.contains("1 snippet"))
+        #expect(summary.contains("document.querySelector") == false)
+        #expect(summary.contains("External call to BrowserAct"))
+        #expect(action.externalRequestPreview?.contains("q=hidden-query") == true)
+    }
+
+    @Test func pluginEndpointBuilderPreservesReverseProxyPathsAndEscapesIDs() throws {
+        let url = try #require(PluginAPIClient.endpointURL(
+            baseURL: "https://example.com/crawler/",
+            path: "/v3/bots/runs/\(PluginAPIClient.safePathComponent("../escape?x"))/status",
+            queryItems: [URLQueryItem(name: "page", value: "2")]
+        ))
+        #expect(url.absoluteString.contains("/v3/bots/runs/%2E%2E%2Fescape%3Fx/status"))
+        #expect(url.query == "page=2")
+        #expect(PluginAPIClient.safePathComponent("%2Fescape") == "%252Fescape")
+        #expect(PluginAPIClient.nestedPagePath("https://example.com/a?q=secret") == "https://example.com/a%3Fq=secret")
+        #expect(PluginAPIClient.nestedPagePath("https://example.com/a%20b?q=secret") == "https://example.com/a%2520b%3Fq=secret")
+    }
+
+    @Test func pluginOutputCompactionDropsBinaryAndRawMarkupButKeepsMetadata() {
+        let raw = #"{"Screenshot":"AAAA","HTML":"<html>large</html>","live_url":"https://remote.example/session/secret","metadata":{"title":"Example","source_url":"https://example.com/?token=secret","note":"See https://example.org/path?signature=hidden"},"response_headers":{"set-cookie":"secret=1"},"links":{"internal":[{"href":"/a"}]}}"#
+        let text = PluginAPIClient.compactJSONText(from: Data(raw.utf8), limit: 8_000) ?? ""
+        #expect(text.contains("[omitted: Screenshot]"))
+        #expect(text.contains("[omitted: HTML]"))
+        #expect(text.contains("[omitted: live_url]"))
+        #expect(text.contains("[omitted: response_headers]"))
+        #expect(text.contains("Example"))
+        #expect(text.contains("https://example.com/…[query removed]"))
+        #expect(text.contains("https://example.org/path…[query removed]"))
+        #expect(text.contains("token=secret") == false)
+        #expect(text.contains("signature=hidden") == false)
+        #expect(text.contains("secret=1") == false)
+        #expect(text.contains("/a"))
+        #expect(text.contains("AAAA") == false)
+
+        let edgeCases = PluginAPIClient.compactJSONText(from: Data(#"{"rawHtml":"<b>x</b>","accessTokenValue":"secret","note":"HTTPS://example.com/a_(b)?token=secret"}"#.utf8), limit: 8_000) ?? ""
+        #expect(edgeCases.contains("[omitted: rawHtml]"))
+        #expect(edgeCases.contains("[omitted: accessTokenValue]"))
+        #expect(edgeCases.contains("token=secret") == false)
+
+        let fragment = PluginAPIClient.redactURLQueries(in: "https://example.com/page#access_token=secret")
+        #expect(fragment.contains("access_token") == false)
+        #expect(fragment.contains("secret") == false)
+    }
+
+    @Test func pluginHostPolicyRejectsPrivateAndReservedTargets() {
+        #expect(PluginAPIClient.isPublicNetworkHost("example.com"))
+        #expect(PluginAPIClient.isPublicNetworkHost("8.8.8.8"))
+        #expect(PluginAPIClient.isPublicNetworkHost("[2606:4700:4700::1111]"))
+        #expect(PluginAPIClient.isPublicNetworkHost("127.0.0.1") == false)
+        #expect(PluginAPIClient.isPublicNetworkHost("127.1") == false)
+        #expect(PluginAPIClient.isPublicNetworkHost("169.254.169.254") == false)
+        #expect(PluginAPIClient.isPublicNetworkHost("localhost") == false)
+        #expect(PluginAPIClient.isPublicNetworkHost("metadata.google.internal") == false)
+        #expect(PluginAPIClient.isPublicNetworkHost("::1") == false)
+        #expect(PluginAPIClient.isPublicNetworkHost("::ffff:192.168.1.1") == false)
+        #expect(PluginAPIClient.isPublicNetworkHost("::ffff:0:1") == false)
+        #expect(PluginAPIClient.isPublicNetworkHost("::ffff:0177.0.0.1") == false)
+        #expect(PluginAPIClient.isPublicNetworkHost("2001:0000::1") == false)
+        #expect(PluginAPIClient.isPublicNetworkHost("0177.0.0.1") == false)
+        #expect(PluginAPIClient.isPublicNetworkHost("0x7f.0.0.1") == false)
+        #expect(PluginAPIClient.isPublicNetworkHost("192.0.0.1") == false)
+    }
+
+    @Test func pluginActionsRoundTripWithoutLosingProviderArguments() throws {
+        var action = AgentAction(type: AgentActionKind.runPlugin.rawValue)
+        action.plugin = BrowserPluginID.crawl4AI.rawValue
+        action.operation = "scrape_job"
+        action.urls = ["https://example.com/a", "https://example.com/b"]
+        action.after = 500
+        action.configuration = #"{"proxy":"none"}"#
+        action.example = #"{"type":"object"}"#
+        action.parseAll = true
+
+        let decoded = try JSONDecoder().decode(AgentAction.self, from: JSONEncoder().encode(action))
+        #expect(decoded.plugin == BrowserPluginID.crawl4AI.rawValue)
+        #expect(decoded.operation == "scrape_job")
+        #expect(decoded.urls?.count == 2)
+        #expect(decoded.after == 500)
+        #expect(decoded.configuration == #"{"proxy":"none"}"#)
+        #expect(decoded.example == #"{"type":"object"}"#)
+        #expect(decoded.parseAll == true)
+    }
+
+    @Test func renderedLinkDiscoveryIsBoundedAndSameOriginByDefault() {
+        let script = PageReader.linkDiscoveryScript(maxCount: 999, sameOrigin: true)
+        #expect(script.contains("var cap = 100"))
+        #expect(script.contains("sameOrigin = true"))
+        #expect(script.contains("u.protocol !== 'http:'"))
+        #expect(script.contains("targetPort !== currentPort"))
+    }
+
+    @Test func legacyPluginOperationsAreNormalizedAndAppSnapshotsAreDiscarded() {
+        let decision = AIService.parseDecision(from: #"{"reasoning":"inspect","action":{"type":"run_plugin","plugin":"crawl4ai","operation":" DISCOVER ","approvalEndpoint":"https://evil.example","approvalServiceKind":"cloud","resolvedTargetParameter":"evil"}}"#)
+        #expect(decision?.action.plugin == BrowserPluginID.crawl4AI.rawValue)
+        #expect(decision?.action.operation == "discover")
+        #expect(decision?.action.approvalEndpoint == nil)
+        #expect(decision?.action.approvalServiceKind == nil)
+        #expect(decision?.action.resolvedTargetParameter == nil)
+    }
+
+    @Test func crawlSchemaIncludesInlineContentAndScriptFallback() throws {
+        let tools = AIService.tools(
+            hasPlan: false,
+            pluginIDs: [BrowserPluginID.crawl4AI.rawValue],
+            crawl4AIServiceKind: .server
+        )
+        let tool = try #require(tools.first { $0.function.name == "crawl4ai" })
+        #expect(tool.function.parameters.properties["text"] != nil)
+
+        let decision = AIService.decision(
+            fromToolNamed: "crawl4ai",
+            argumentsJSON: #"{"reasoning":"extract local text","operation":"structured_extract","text":"private source text","instruction":"Return the title"}"#
+        )
+        #expect(decision?.action.text == "private source text")
+    }
+
+    @Test func expandedPrivateIPv6AndCredentialTextAreRejectedOrScrubbed() {
+        #expect(PluginAPIClient.isPublicNetworkHost("0:0:0:0:0:0:0:1") == false)
+        #expect(PluginAPIClient.isPublicNetworkHost("fec0::1") == false)
+        #expect(PluginAPIClient.isPublicNetworkHost("0:0:0:0:0:ffff:7f00:1") == false)
+
+        let text = "Authorization: Bearer secret-value-123456\n/relative?X-Amz-Signature=SECRET\n//cdn.example/file?token=SECRET"
+        let scrubbed = PluginAPIClient.redactURLQueries(in: PluginAPIClient.redactSensitiveText(text))
+        #expect(scrubbed.contains("secret-value-123456") == false)
+        #expect(scrubbed.contains("SECRET") == false)
+        #expect(scrubbed.contains("query removed"))
+    }
+
+    @Test func approvalPreviewShowsCompleteBoundedArgumentsAndInjectedDefaults() {
+        var action = AgentAction(type: AgentActionKind.runPlugin.rawValue)
+        action.plugin = BrowserPluginID.crawl4AI.rawValue
+        action.operation = "scrape"
+        action.url = "https://example.com/products"
+        action.configuration = String(repeating: "x", count: 9_000)
+        action.resolvedWaitSeconds = 2.5
+        let preview = action.externalRequestPreview ?? ""
+        #expect(preview.contains("configuration: \(String(repeating: "x", count: 9_000))"))
+        #expect(preview.contains("effective_format: both"))
+        #expect(preview.contains("effective_parse: false"))
+        #expect(preview.contains("resolved_wait_seconds: 2.5"))
+    }
+
+    @Test func encodedRemoteURLsAndDSNsAreScrubbedAtTheOutputBoundary() {
+        let encoded = PluginAPIClient.sanitizeAndTruncate(
+            "https%3A%2F%2Fexample.com%2Fa%3Ftoken%3DSECRET and https&#58;//example.org/b?signature=SECRET",
+            limit: 2_000
+        )
+        #expect(encoded.contains("SECRET") == false)
+        #expect(encoded.contains("omitted") || encoded.contains("query removed"))
+
+        let dsn = PluginAPIClient.sanitizeAndTruncate(
+            "postgres://alice:password@example.com/db",
+            limit: 2_000
+        )
+        #expect(dsn.contains("password") == false)
+        #expect(PluginAPIClient.isPublicNetworkHost("100::1") == false)
+        #expect(PluginAPIClient.isPublicNetworkHost("2001:2::1") == false)
+    }
+
+    @Test func failedStepsHaveAnExplicitHistoryState() {
+        #expect(StepStatus.failed.label == "FAILED")
+    }
+
+    @Test func mixedEntityAndPercentEncodedSecretsAreScrubbed() {
+        let mixedURL = PluginAPIClient.sanitizeAndTruncate(
+            "https&#58;&#47;/alice:password@example.com/db",
+            limit: 2_000
+        )
+        #expect(mixedURL.contains("password") == false)
+        #expect(mixedURL.contains("alice") == false)
+
+        let relativeQuery = PluginAPIClient.sanitizeAndTruncate(
+            "/download?X-Amz-Signature%3DSECRET",
+            limit: 2_000
+        )
+        #expect(relativeQuery.contains("SECRET") == false)
+        #expect(relativeQuery.contains("query removed") || relativeQuery.contains("omitted"))
+    }
+
+    @Test func benignEncodedTextKeepsItsOriginalBytes() {
+        // Percent/entity decoding is a detection probe, not an output format.
+        // A benign escape must reach the model exactly as the server sent it.
+        let safe = PluginAPIClient.sanitizeAndTruncate(
+            "Save 100%25 off &#47; see https://example.com/a%20b?q=a%2Bb for details",
+            limit: 2_000
+        )
+        #expect(safe.contains("100%25"))
+        #expect(safe.contains("a%20b"))
+        #expect(safe.contains("a%2Bb"))
+    }
+
+    @Test func stoppingARunIsNotReportedAsACredentialRefusal() async {
+        // The output boundary fails closed when the task is cancelled, so
+        // request validation must use the cancellation-independent predicate.
+        // Otherwise pressing Stop would reject every remaining argument and
+        // blame the model for a credential it never sent.
+        let probe = await Task { () -> (benign: Bool, secret: Bool) in
+            withUnsafeCurrentTask { task in task?.cancel() }
+            return (
+                PluginAPIClient.containsSensitiveRemoteText("https://example.com/page?a=1"),
+                PluginAPIClient.containsSensitiveRemoteText("password=SECRET")
+            )
+        }.value
+        #expect(probe.benign == false)
+        #expect(probe.secret == true)
+    }
+
+    @Test func encodedCredentialAssignmentsAreStillRefusedOnTheRequestSide() {
+        // The predicate must probe the decoded form, not just the literal one:
+        // `password%3DSECRET` carries no `=` and would otherwise pass.
+        #expect(PluginAPIClient.containsSensitiveRemoteText("password%3DSECRET"))
+        #expect(PluginAPIClient.containsSensitiveRemoteText("api_key&#61;AKIAIOSFODNN7EXAMPLE"))
+        #expect(PluginAPIClient.containsSensitiveRemoteText("password&#x3d;hunter2"))
+        #expect(PluginAPIClient.containsSensitiveRemoteText("Bearer&#32;eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.sig"))
+        // A URL with no credential in either form is still allowed through.
+        #expect(PluginAPIClient.containsSensitiveRemoteText("https://example.com/a/b?page=2") == false)
+    }
+
+    @Test func encodedEqualsEntitiesAreScrubbedAtTheOutputBoundary() {
+        // `password`, `api_key`, and `signature` are assignment names the
+        // credential grammar knows; an encoded `=` must not hide the value.
+        let assigned = PluginAPIClient.sanitizeAndTruncate("password&#61;SECRET", limit: 2_000)
+        #expect(assigned.contains("SECRET") == false)
+
+        let hex = PluginAPIClient.sanitizeAndTruncate("api_key&#x3d;SECRET", limit: 2_000)
+        #expect(hex.contains("SECRET") == false)
+
+        let named = PluginAPIClient.sanitizeAndTruncate("signature&equals;SECRET", limit: 2_000)
+        #expect(named.contains("SECRET") == false)
+    }
+
+    @Test func remoteObjectKeysAreRedactedAndTheOmissionMarkerIsInert() {
+        // A server-controlled key can itself be a credential. The marker must
+        // not echo it, and the key must not survive into the rendered JSON.
+        let payload: [String: Any] = [
+            "api_key=SUPERSECRETVALUE": "value",
+            "title": "Quarterly report",
+        ]
+        let data = (try? JSONSerialization.data(withJSONObject: payload)) ?? Data()
+        let compacted = PluginAPIClient.compactJSONText(from: data, limit: 4_000) ?? ""
+        #expect(compacted.contains("SUPERSECRETVALUE") == false)
+        #expect(compacted.contains("[omitted: sensitive field]"))
+        // A harmless key and its value are still readable.
+        #expect(compacted.contains("Quarterly report"))
+
+        // A key that redaction only partly covers is discarded outright, since
+        // the leftovers of a partial match can still be a secret.
+        let bearerKey = PluginAPIClient.safeRemoteFieldName(
+            "Authorization: Bearer abcdef0123456789abcdef0123456789",
+            fallback: "__omitted_field_0__"
+        )
+        #expect(bearerKey == "__omitted_field_0__")
+        #expect(bearerKey.contains("abcdef0123456789") == false)
+
+        // An ordinary key survives untouched.
+        #expect(
+            PluginAPIClient.safeRemoteFieldName("title", fallback: "__omitted_field_0__") == "title"
+        )
+    }
+
+    @Test func deeplyNestedJSONIsRefusedBeforeItIsParsed() {
+        let hostile = String(repeating: "[", count: 5_000) + String(repeating: "]", count: 5_000)
+        #expect(PluginManager.isWithinJSONNestingLimit(hostile) == false)
+
+        let normal = #"{"browser":{"type":"BrowserConfig","params":{"headless":true}}}"#
+        #expect(PluginManager.isWithinJSONNestingLimit(normal))
+
+        // Brackets inside strings are content, not structure.
+        #expect(PluginManager.isWithinJSONNestingLimit(#"{"note":"[[[[[["}"#))
+        #expect(PluginManager.isWithinJSONNestingLimit(#"{"escaped":"a \" ] b"}"#))
+    }
+
+    @Test func theApprovedWaitSnapshotIsWhatThePreviewReports() {
+        // A model-supplied wait must not shadow the frozen, disclosed value.
+        var action = AgentAction(type: AgentActionKind.runPlugin.rawValue)
+        action.plugin = BrowserPluginID.crawl4AI.rawValue
+        action.operation = "screenshot"
+        action.url = "https://example.com/products"
+        action.waitSeconds = 9
+        action.resolvedWaitSeconds = 4
+        let preview = action.externalRequestPreview ?? ""
+        #expect(preview.contains("effective_wait_seconds: 4.0"))
+        #expect(preview.contains("resolved_wait_seconds: 4.0"))
+    }
 }

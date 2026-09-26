@@ -22,6 +22,9 @@ nonisolated enum AgentActionKind: String, Codable, CaseIterable {
     case back
     case extract
     case pageOverview = "page_overview"
+    /// Execute one explicitly enabled external BrowserAct or Crawl4AI operation.
+    /// Unlike built-in tools, this always pauses for user approval.
+    case runPlugin = "run_plugin"
     case wait
     case revisePlan = "revise_plan"
     case rewind
@@ -60,6 +63,7 @@ nonisolated enum AgentActionKind: String, Codable, CaseIterable {
         case .back: "BACK"
         case .extract: "READ"
         case .pageOverview: "PAGE VIEW"
+        case .runPlugin: "PLUGIN"
         case .wait: "WAIT"
         case .revisePlan: "PLAN REVISED"
         case .rewind: "REWIND"
@@ -93,6 +97,7 @@ nonisolated enum AgentActionKind: String, Codable, CaseIterable {
         case .back: "arrow.uturn.left"
         case .extract: "doc.text.magnifyingglass"
         case .pageOverview: "rectangle.expand.vertical"
+        case .runPlugin: "puzzlepiece.extension.fill"
         case .wait: "clock.fill"
         case .revisePlan: "list.bullet.rectangle.portrait.fill"
         case .rewind: "arrow.uturn.backward.circle.fill"

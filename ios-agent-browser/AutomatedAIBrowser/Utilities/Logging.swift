@@ -52,6 +52,10 @@ nonisolated enum AppLog {
     /// so subsequent stages do not need to reopen logging definitions.
     static let ledger = Logger(subsystem: subsystem, category: "ledger")
 
+    /// Optional BrowserAct and Crawl4AI adapters. Only structural transport facts
+    /// are public; targets, payloads, responses, and credentials stay private.
+    static let plugin = Logger(subsystem: subsystem, category: "plugin")
+
     /// Shared signposter for measuring wall-clock phase intervals in Instruments.
     /// Emits signposts under the `loop` category to profile step bottlenecks.
     static let loopSignposter = OSSignposter(subsystem: subsystem, category: "loop")

@@ -18,6 +18,7 @@ struct StepCardView: View {
             if step.action.kind == .revisePlan { return Theme.violet }
             if step.isHeadStartEntry || step.isReplayEntry { return Theme.amber }
             return Theme.cyan
+        case .failed: return Theme.red
         case .terminal: return step.action.kind == .fail ? Theme.red : Theme.green
         }
     }

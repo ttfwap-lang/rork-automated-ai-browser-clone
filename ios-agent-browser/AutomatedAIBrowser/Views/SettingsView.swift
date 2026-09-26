@@ -10,6 +10,7 @@ struct SettingsView: View {
     @Environment(LessonBook.self) private var lessonBook
     @Environment(RoutineStore.self) private var routines
     @Environment(Dossier.self) private var dossier
+    @Environment(PluginManager.self) private var plugins
     @Environment(\.dismiss) private var dismiss
     @State private var showDossier = false
     @State private var confirmClear = false
@@ -32,6 +33,7 @@ struct SettingsView: View {
                 dossierSection
                 judgmentSection
                 modelSection
+                pluginsSection
                 dataSection
                 limitsSection
             }
@@ -294,6 +296,34 @@ struct SettingsView: View {
             Text("Preferred Model")
         } footer: {
             Text("Used for normal steps under Auto, and for every step when the strategy is Always. Each step sends one page snapshot and uses a small amount of Rork AI Cloud credits.")
+        }
+    }
+
+    private var pluginsSection: some View {
+        Section {
+            NavigationLink {
+                PluginSettingsView()
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: "puzzlepiece.extension.fill")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(plugins.enabledPluginCount > 0 ? Theme.cyan : Theme.textSecondary)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("BrowserAct & Crawl4AI")
+                            .font(.system(size: 15, weight: .semibold))
+                        Text(plugins.enabledPluginCount == 0
+                             ? "No external plugins enabled"
+                             : "\(plugins.enabledPluginCount) plugin\(plugins.enabledPluginCount == 1 ? "" : "s") available to the agent")
+                            .font(.system(size: 12))
+                            .foregroundStyle(Theme.textSecondary)
+                    }
+                    Spacer(minLength: 0)
+                }
+            }
+        } header: {
+            Text("External Plugins")
+        } footer: {
+            Text("Optional remote Bot automation and crawling. API keys stay in this iPhone's Keychain, outputs are capped, and every external call stops for your approval — even in autopilot. Disabled plugins are never shown to the model.")
         }
     }
 

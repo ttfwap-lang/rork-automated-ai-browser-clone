@@ -10,6 +10,43 @@ nonisolated enum PageReader {
     /// Character budget for one reading.
     static let budget = 9_000
 
+    /// Returns absolute, de-duplicated HTTP(S) links from the rendered page.
+    /// Used by the Crawl4AI plugin's `discover` operation so a crawl can begin
+    /// from links the user can actually see, including JavaScript-rendered hrefs.
+    static func linkDiscoveryScript(maxCount: Int, sameOrigin: Bool) -> String {
+        let cap = min(max(maxCount, 1), 100)
+        return #"""
+        (function(){
+          try {
+            var cap = \#(cap), sameOrigin = \#(sameOrigin ? "true" : "false");
+            var seen = Object.create(null), out = [];
+            var nodes = document.querySelectorAll('a[href],area[href]');
+            for (var i = 0; i < nodes.length && out.length < cap; i++) {
+              var raw = nodes[i].href || nodes[i].getAttribute('href') || '';
+              if (!raw) { continue; }
+              try {
+                var u = new URL(raw, document.baseURI);
+                if (u.protocol !== 'http:' && u.protocol !== 'https:') { continue; }
+                var currentPort = location.port || (location.protocol === 'https:' ? '443' : '80');
+                var targetPort = u.port || (u.protocol === 'https:' ? '443' : '80');
+                if (sameOrigin && (
+                  u.protocol !== location.protocol ||
+                  u.hostname.toLowerCase() !== location.hostname.toLowerCase() ||
+                  targetPort !== currentPort
+                )) { continue; }
+                u.hash = '';
+                var address = u.href;
+                if (seen[address]) { continue; }
+                seen[address] = true;
+                out.push(address);
+              } catch (e) {}
+            }
+            return JSON.stringify(out);
+          } catch (e) { return '[]'; }
+        })()
+        """#
+    }
+
     static let readScript = #"""
         (function(){
           try {
