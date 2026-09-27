@@ -230,6 +230,29 @@ struct DecisionLogicTests {
         #expect(GoalDetails.briefingLine([]) == nil)
     }
 
+    @Test func aGoalTypedInCapitalsIsNotReadAsOneLongName() {
+        #expect(GoalDetails.properNouns(in: "FIND CHEAP FLIGHTS TO PARIS IN MAY").isEmpty)
+        #expect(GoalDetails.properNouns(in: "find cheap flights to Paris in May") == ["Paris", "May"])
+    }
+
+    // MARK: - What a run teaches
+
+    @Test func wallsAreReadOnWholeWords() {
+        #expect(LessonDistiller.readsAsWall("403 Forbidden"))
+        #expect(LessonDistiller.readsAsWall("the site runs bot detection"))
+        #expect(LessonDistiller.readsAsWall("the price is $1403") == false)
+        #expect(LessonDistiller.readsAsWall("the Humane Society page has no listings") == false)
+    }
+
+    @Test func onlyAControlThatIgnoredThePressIsRecordedAsDead() {
+        let ignored = RecipeDistiller.Move(kind: .tapElement, result: "tapped [3] · \(ReactionWatch.noReactionPhrase)")
+        let missed = RecipeDistiller.Move(kind: .tapElement, result: "element 3 is no longer on the page — the page changed; look again before acting")
+        let dropped = RecipeDistiller.Move(kind: .typeInto, result: #"typed "x" into [2] · the field did not take the text — it is still empty"#)
+        #expect(LessonDistiller.controlIgnored(ignored))
+        #expect(!LessonDistiller.controlIgnored(missed), "a re-drawn page says nothing about the control")
+        #expect(LessonDistiller.controlIgnored(dropped))
+    }
+
     // MARK: - Tools: notes and questions
 
     @Test func notedFactsRideAlongWithAnyMove() {
@@ -315,6 +338,19 @@ struct DecisionLogicTests {
         #expect(!ReactionWatch.isSettled(ReactionWatch.parseQuiet(#"{"ok":true,"since":600,"inflight":2}"#)))
         #expect(!ReactionWatch.isSettled(ReactionWatch.parseQuiet(#"{"ok":true,"since":100,"inflight":0}"#)))
         #expect(!ReactionWatch.parseQuiet("js error: timed out").ok)
+    }
+
+    @Test func aTickingPageSettlesButARenderingOneDoesNot() {
+        // One isolated change a moment ago: a clock or ticker, not a render.
+        #expect(ReactionWatch.isSettled(ReactionWatch.parseQuiet(#"{"ok":true,"since":200,"inflight":0,"bursts":1}"#)))
+        #expect(!ReactionWatch.isSettled(ReactionWatch.parseQuiet(#"{"ok":true,"since":200,"inflight":0,"bursts":3}"#)))
+        #expect(!ReactionWatch.isSettled(ReactionWatch.parseQuiet(#"{"ok":true,"since":200,"inflight":1,"bursts":1}"#)))
+    }
+
+    @Test func theAgentsOwnBookkeepingIsNotAReaction() {
+        // The scanner re-numbers every control with data-rork-agent; counted,
+        // that churn inflated the idle baseline and erased real reactions.
+        #expect(ReactionWatch.sortFunction.contains("'data-rork-'"))
     }
 
     @Test func theWatcherKnowsWhichElementWasTargeted() {

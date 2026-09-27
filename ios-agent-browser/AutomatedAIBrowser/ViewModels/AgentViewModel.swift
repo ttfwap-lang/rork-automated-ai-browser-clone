@@ -2382,6 +2382,13 @@ final class AgentViewModel {
             return .stop("the target could not be read back from the page")
         }
 
+        // Approval is keyed on whether the SAVED step committed. A repair that
+        // lands a harmless step ("Next") on a control that commits ("Next — pay
+        // now") would otherwise press it unasked, in any mode.
+        if healNote != nil, !move.isCommitting, OnDeviceGate.isIrreversible(element.name) {
+            return .stop("the closest match for “\(target.name)” is \(element.shortDescriptor), which commits — a repair never turns a harmless step into a commitment")
+        }
+
         var action = AgentAction(type: move.action)
         action.element = elementID
         action.elementName = element.shortDescriptor
@@ -3179,13 +3186,9 @@ final class AgentViewModel {
         return untried.first { $0.number != currentBookmarkNumber } ?? untried.first
     }
 
+    /// One list of walls for the whole app, matched on whole words.
     nonisolated private static func isHardWall(_ reason: String) -> Bool {
-        let lower = reason.lowercased()
-        let walls = [
-            "captcha", "bot ", "bot-", "robot", "log in", "login", "sign in", "signin",
-            "account", "blocked", "403", "paywall", "verify you", "human", "subscription",
-        ]
-        return walls.contains { lower.contains($0) }
+        LessonDistiller.readsAsWall(reason)
     }
 
     private func isRepeatingRecently() -> Bool {

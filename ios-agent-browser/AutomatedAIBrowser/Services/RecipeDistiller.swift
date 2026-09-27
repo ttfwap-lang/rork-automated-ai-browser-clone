@@ -151,7 +151,7 @@ nonisolated enum RecipeDistiller {
                OnDeviceGate.isDismissal(name) {
                 traps.append("a “\(name)” banner has to be cleared first")
             }
-            if ReactionWatch.readsAsFailure(move.result ?? ""),
+            if LessonDistiller.controlIgnored(move),
                let name = move.fingerprint?.name, !name.isEmpty {
                 traps.append("“\(name)” did nothing when pressed")
             }

@@ -143,6 +143,11 @@ nonisolated enum GoalDetails {
     /// Runs of capitalised words that do not start a sentence: "Lisbon",
     /// "New York", "Golden Gate Park".
     static func properNouns(in text: String) -> [String] {
+        // A goal typed in capitals says nothing about which words are names;
+        // read that way, every word would become one long "name".
+        let letters = text.filter(\.isLetter)
+        let upper = letters.filter(\.isUppercase)
+        if letters.count >= 8, Double(upper.count) / Double(letters.count) > 0.6 { return [] }
         let tokens = text.split(whereSeparator: { $0 == " " || $0 == "\n" || $0 == "\t" }).map(String.init)
         var runs: [String] = []
         var current: [String] = []

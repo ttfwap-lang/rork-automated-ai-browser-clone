@@ -59,7 +59,7 @@ nonisolated enum LessonDistiller {
     static let wallWords = [
         "captcha", "robot", "bot check", "log in", "login", "logged in", "sign in",
         "signin", "sign-in", "account", "paywall", "subscription", "subscribe",
-        "verify you", "403", "blocked", "not a human", "human",
+        "verify you", "403", "blocked", "not a human", "human", "bot", "bots",
     ]
 
     // MARK: - The mechanical read
@@ -85,7 +85,7 @@ nonisolated enum LessonDistiller {
 
         // Controls that were pressed and did nothing, and fields that dropped
         // what was typed into them.
-        for move in evidence.moves where ReactionWatch.readsAsFailure(move.result ?? "") {
+        for move in evidence.moves where controlIgnored(move) {
             let name = move.fingerprint?.name
             switch move.kind {
             case .typeInto, .typeText, .fillForm:
@@ -128,9 +128,26 @@ nonisolated enum LessonDistiller {
     }
 
     /// True when a give-up reason describes a wall rather than a dead end.
+    /// Whole words only: "403" is not inside "$1403", nor "human" inside
+    /// "Humane Society".
     static func readsAsWall(_ reason: String) -> Bool {
-        let lower = reason.lowercased()
-        return wallWords.contains { lower.contains($0) }
+        Wording.containsAny(reason, wallWords)
+    }
+
+    /// True when a move reached its control and the control ignored it — the
+    /// one kind of failure that says something about the control itself. A miss
+    /// because the page had re-drawn, a missing argument or a script error says
+    /// nothing about the control, and recording it would leave a false caution
+    /// on the site for every later run.
+    static func controlIgnored(_ move: RecipeDistiller.Move) -> Bool {
+        let result = move.result ?? ""
+        switch move.kind {
+        case .typeInto, .typeText, .fillForm:
+            return Wording.appAuthored(result).lowercased().contains("did not take the text")
+                || ReactionWatch.readsAsNoReaction(result)
+        default:
+            return ReactionWatch.readsAsNoReaction(result)
+        }
     }
 
     /// True when a handover note says the page no longer matches what was known.

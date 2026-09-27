@@ -204,6 +204,10 @@ nonisolated enum ReactionWatch {
             var m = list[i];
             if (agentNode(m.target)) { continue; }
             if (m.type === 'attributes') {
+              // The agent's own bookkeeping (the scanner numbers every control
+              // with data-rork-agent) is not the page reacting — counted, it
+              // inflated the idle baseline enough to erase real reactions.
+              if ((m.attributeName || '').indexOf('data-rork-') === 0) { continue; }
               if (MEANINGFUL[m.attributeName] || related(m.target)) { out.hard++; } else { out.soft++; }
               continue;
             }
@@ -270,13 +274,18 @@ nonisolated enum ReactionWatch {
         function __rorkQuietInstall() {
           var q = window.__rorkQuiet;
           if (q && q.obs) { return q; }
-          q = { t0: Date.now(), last: Date.now(), hard: 0, soft: 0 };
+          q = { t0: Date.now(), last: Date.now(), hard: 0, soft: 0, recent: [] };
           q.obs = new MutationObserver(function(list){
             var out = { hard: 0, soft: 0, added: 0 };
             __rorkSort(list, null, out);
             q.hard += out.hard;
             q.soft += out.soft;
-            if (out.hard > 0) { q.last = Date.now(); }
+            if (out.hard > 0) {
+              var now = Date.now();
+              q.last = now;
+              q.recent.push(now);
+              if (q.recent.length > 40) { q.recent.shift(); }
+            }
           });
           q.obs.observe(document.documentElement, { subtree: true, childList: true, attributes: true, characterData: true });
           window.__rorkQuiet = q;
@@ -305,7 +314,10 @@ nonisolated enum ReactionWatch {
             \(networkFunctions)
             var q = window.__rorkQuiet;
             if (!q) { return JSON.stringify({ ok: false }); }
-            return JSON.stringify({ ok: true, since: Date.now() - q.last, inflight: __rorkInflight() });
+            var now = Date.now(), bursts = 0;
+            var recent = q.recent || [];
+            for (var i = 0; i < recent.length; i++) { if (now - recent[i] < 400) { bursts++; } }
+            return JSON.stringify({ ok: true, since: now - q.last, inflight: __rorkInflight(), bursts: bursts });
           } catch (e) { return JSON.stringify({ ok: false }); }
         })()
         """
@@ -329,12 +341,15 @@ nonisolated enum ReactionWatch {
         /// Seconds since the last hard change.
         let quietFor: TimeInterval
         let inflight: Int
+        /// Separate batches of hard changes in the last 400 ms.
+        var bursts: Int = 0
     }
 
     nonisolated private struct QuietPayload: Decodable {
         let ok: Bool
         let since: Double?
         let inflight: Int?
+        let bursts: Int?
     }
 
     static func parseQuiet(_ raw: String) -> Quiet {
@@ -343,13 +358,23 @@ nonisolated enum ReactionWatch {
               let payload = try? JSONDecoder().decode(QuietPayload.self, from: Data(trimmed.utf8)),
               payload.ok
         else { return Quiet(ok: false, quietFor: 0, inflight: 0) }
-        return Quiet(ok: true, quietFor: max(0, (payload.since ?? 0) / 1000), inflight: max(0, payload.inflight ?? 0))
+        return Quiet(
+            ok: true,
+            quietFor: max(0, (payload.since ?? 0) / 1000),
+            inflight: max(0, payload.inflight ?? 0),
+            bursts: max(0, payload.bursts ?? 0)
+        )
     }
 
-    /// True once the page has gone this long without a hard change and has no
-    /// request still out.
+    /// True once no request the page sent is still out and the page has either
+    /// gone quiet, or is only ticking — one isolated change a moment ago, the
+    /// way a live clock or price ticker changes, rather than a render in
+    /// progress. Without the second case a page with a clock never settled and
+    /// every look waited the full maximum.
     static func isSettled(_ quiet: Quiet, window: TimeInterval = 0.35) -> Bool {
-        quiet.ok && quiet.quietFor >= window && quiet.inflight == 0
+        guard quiet.ok, quiet.inflight == 0 else { return false }
+        if quiet.quietFor >= window { return true }
+        return quiet.quietFor >= 0.15 && quiet.bursts <= 1
     }
 
     /// Starts the watcher around one move. `targetID` is the element's number in
