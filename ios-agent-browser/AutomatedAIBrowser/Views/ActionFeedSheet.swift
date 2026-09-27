@@ -50,6 +50,10 @@ struct ActionFeedSheet: View {
                 QuestionCard()
                     .padding(.horizontal, 16)
                     .padding(.bottom, 8)
+            } else if agent.pendingHandOver != nil {
+                HandOverCard()
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 8)
             }
         }
         .sheet(item: $visionStep) { step in

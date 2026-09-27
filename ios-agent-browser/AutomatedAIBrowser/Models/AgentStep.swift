@@ -6,7 +6,8 @@ import UIKit
 struct AgentStep: Identifiable {
     let id = UUID()
     let index: Int
-    let action: AgentAction
+    /// Replaced only when a give-up at a wall is turned into your turn.
+    var action: AgentAction
     let reasoning: String
     var result: String?
     var status: StepStatus

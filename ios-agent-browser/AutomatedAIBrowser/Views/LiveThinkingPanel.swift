@@ -60,7 +60,7 @@ struct LiveThinkingPanel: View {
     /// mistake, cyan otherwise.
     private var edgeColor: Color {
         if flashCount > 0 { return Theme.red.opacity(0.75) }
-        if agent.phase == .awaitingApproval || agent.phase == .awaitingAnswer { return Theme.amber.opacity(0.55) }
+        if agent.phase == .awaitingApproval || agent.phase == .awaitingAnswer || agent.phase == .yourTurn { return Theme.amber.opacity(0.55) }
         return Theme.cyan.opacity(0.32)
     }
 

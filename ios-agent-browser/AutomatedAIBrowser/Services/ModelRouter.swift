@@ -97,6 +97,9 @@ nonisolated enum ModelRouter {
     /// True for a move that cannot be taken back: pressing a control whose
     /// name reads as a commitment, or any submit/Enter outside a search box.
     static func isCommitting(_ action: AgentAction, in observation: PageObservation?) -> Bool {
+        if let moves = action.moves, !moves.isEmpty {
+            return moves.contains { isCommitting($0, in: observation) }
+        }
         var names: [String] = []
         if let name = action.elementName { names.append(name) }
         for id in [action.element, action.from, action.to].compactMap({ $0 }) {

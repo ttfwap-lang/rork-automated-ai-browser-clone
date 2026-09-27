@@ -51,8 +51,8 @@ final class AgentViewModel {
                 phaseIntervalState = nil
             }
 
-            let wasPaused = (oldValue == .awaitingApproval || oldValue == .awaitingAnswer || oldValue == .remembering)
-            let isPaused = (phase == .awaitingApproval || phase == .awaitingAnswer || phase == .remembering)
+            let wasPaused = (oldValue == .awaitingApproval || oldValue == .awaitingAnswer || oldValue == .yourTurn || oldValue == .remembering)
+            let isPaused = (phase == .awaitingApproval || phase == .awaitingAnswer || phase == .yourTurn || phase == .remembering)
 
             if !wasPaused && isPaused {
                 currentPauseStart = Date()
@@ -250,6 +250,33 @@ final class AgentViewModel {
     /// Earlier moves replayed to the model as a tool-call conversation.
     private static let transcriptTurns = 6
 
+    /// What you are being asked to do in the browser yourself, while it waits.
+    private(set) var pendingHandOver: String?
+    private var handOverContinuation: CheckedContinuation<Bool, Never>?
+    private var handOversUsed = 0
+    /// Give-ups at a wall pushed back this run, when hand-over is off.
+    private var wallPushbacks = 0
+    /// What the page looked like at the last look, to notice moves that did nothing.
+    private var lastFingerprint: String?
+    /// Moves in a row that left the page exactly as it was.
+    private var stagnantSteps = 0
+    /// The controls on screen at the last look, to mark the ones that are new.
+    private var lastElementKeys: Set<String> = []
+    private var lastElementPage = ""
+    /// Checks already spent on each checklist task this run.
+    private var taskChecks: [Int: Int] = [:]
+    /// One-shot notes for the next briefing: tasks the check did not accept,
+    /// and what the person did in their turn.
+    private var pendingTaskNote: String?
+    private var pendingHandBackNote: String?
+    /// Each move of the last do_sequence with its own result, for the route memory.
+    private var sequenceResults: [(action: AgentAction, result: String)] = []
+
+    private static let maxHandOvers = 3
+    private static let maxWallPushbacks = 2
+    /// Checks per task before the agent's own tick is simply accepted.
+    private static let maxTaskChecks = 2
+
     /// How many steps on the same task before the briefing suggests re-planning.
     private static let stuckNudgeThreshold = 4
     /// Rewinds allowed per mission.
@@ -409,6 +436,17 @@ final class AgentViewModel {
         personAnswers = []
         questionsAsked = 0
         transcriptRejected = false
+        pendingHandOver = nil
+        handOversUsed = 0
+        wallPushbacks = 0
+        lastFingerprint = nil
+        stagnantSteps = 0
+        lastElementKeys = []
+        lastElementPage = ""
+        taskChecks = [:]
+        pendingTaskNote = nil
+        pendingHandBackNote = nil
+        sequenceResults = []
         activeGoal = goal
         currentStepIndex = 0
         maxStepsThisRun = settings.maxSteps
@@ -449,6 +487,7 @@ final class AgentViewModel {
         runTask?.cancel()
         resumeApproval(false)
         resumeQuestion(nil)
+        resumeHandOver(false)
     }
 
     func approvePendingAction() {
@@ -697,7 +736,7 @@ final class AgentViewModel {
                     AppLog.loop.warning("Content process termination detected at start of step; observation marked stale")
                     self.lastObservation = nil
                 }
-                let observation = await self.webProxy.observe()
+                let observation = self.noticeChanges(in: await self.webProxy.observe())
                 guard !Task.isCancelled else { return .loopReturn }
                 self.lastObservation = observation
                 if observation?.overlayLikely == true { self.overlaySeenThisRun = true }
@@ -737,7 +776,8 @@ final class AgentViewModel {
                     lastResult: self.lastResultLine,
                     isRepeating: self.isRepeatingRecently(),
                     taskStuckCount: self.taskStuckCount,
-                    hasObjection: objection != nil || mistake != nil
+                    hasObjection: objection != nil || mistake != nil,
+                    stagnantSteps: self.stagnantSteps
                 ))
                 let routingInputs = ModelRouter.Inputs(
                     strategy: self.settings.modelStrategy,
@@ -759,6 +799,14 @@ final class AgentViewModel {
                 // escalated builds its request twice.
                 let factsNote = self.factsNote()
                 let extractedThisStep = currentExtracted
+                let nudgeThisStep = self.combinedNudge()
+                // A simple, fully listed page on the fast model needs no picture:
+                // the element list says everything, and the screenshot is most of
+                // the request. page_overview is the way back to sight.
+                let textOnly = self.settings.modelStrategy == .auto
+                    && read.difficulty == .routine
+                    && overview == nil
+                    && observation.map { !$0.elements.isEmpty && !$0.isPartial && $0.blockedPanelCount == 0 && $0.unlistedVisibleCount == 0 } == true
                 let makeRequest: (ModelChoice) -> AIService.DecisionRequest = { choice in
                     var request = AIService.DecisionRequest(
                         goal: goal,
@@ -769,12 +817,12 @@ final class AgentViewModel {
                         historyLines: self.historyLines(),
                         extractedText: extractedThisStep,
                         pageMap: observation?.mapText,
-                        imageBase64: snapshotImage.map { Self.jpegBase64(from: $0) } ?? "",
+                        imageBase64: (textOnly && choice == .fast) ? "" : (snapshotImage.map { Self.jpegBase64(from: $0) } ?? ""),
                         overviewImageBase64: overview.map { Self.jpegBase64(from: $0.image, maxBytes: 1_500_000, startQuality: 0.55) },
                         overviewNote: overview?.note,
                         planBriefing: self.plan?.briefingText,
                         objection: objection,
-                        nudge: self.stuckNudge(),
+                        nudge: nudgeThisStep,
                         difficultyNote: read.briefingNote,
                         bookmarksNote: self.bookmarksNote(),
                         runnerUpNote: runnerUpNote,
@@ -793,6 +841,8 @@ final class AgentViewModel {
                     request.answersNote = self.answersNote()
                     request.goalDetailsNote = GoalDetails.briefingLine(self.goalDetails)
                     request.canAskUser = self.questionsAsked < Self.maxQuestions
+                    request.canHandOver = self.settings.handOverEnabled && self.handOversUsed < Self.maxHandOvers
+                    request.textOnly = textOnly && choice == .fast
                     request.transcript = self.transcriptRejected ? [] : self.transcript()
                     return request
                 }
@@ -892,6 +942,30 @@ final class AgentViewModel {
                     resolvedAction.targetKey = match.targetKey(in: observation, urlString: pageURL)
                     fingerprint = ElementFingerprint.make(for: match, in: observation)
                 }
+                if var moves = resolvedAction.moves, let observation {
+                    for index in moves.indices {
+                        guard let id = moves[index].element, let match = observation.element(withID: id) else { continue }
+                        moves[index].elementName = match.shortDescriptor
+                        moves[index].targetKey = match.targetKey(in: observation, urlString: pageURL)
+                    }
+                    resolvedAction.moves = moves
+                }
+                // The model's own verdict on its last move counts as evidence:
+                // a move it saw fail is remembered as failed even when the page
+                // technically reacted.
+                if resolvedAction.previousMove == "failed",
+                   let previous = self.steps.last(where: { $0.action.kind.isPageAction && $0.status == .executed }) {
+                    self.failedSignatures.insert(previous.action.repetitionSignature)
+                }
+                // Ticks are checked before they count.
+                if resolvedAction.kind != .done, let claimed = resolvedAction.completedTasks, !claimed.isEmpty {
+                    resolvedAction.completedTasks = await self.checkedTaskClaims(
+                        claimed,
+                        goal: goal,
+                        snapshot: rawSnapshot
+                    )
+                    guard !Task.isCancelled else { return .loopReturn }
+                }
                 // Checked against the page the move was decided on, before the
                 // move can change it.
                 self.pendingFactNote = await self.recordFacts(resolvedAction.notedFacts)
@@ -936,6 +1010,25 @@ final class AgentViewModel {
                 case .fail:
                     let reason = resolvedAction.reason ?? "The agent couldn't complete the goal."
                     self.lastFailReason = reason
+                    if Self.isHardWall(reason), index < self.maxStepsThisRun {
+                        // Hand-over on: the person does that part. Off: the agent
+                        // is sent back to keep working the page's own route.
+                        if self.settings.handOverEnabled, self.handOversUsed < Self.maxHandOvers {
+                            var handOver = AgentAction(type: AgentActionKind.handOver.rawValue)
+                            handOver.instruction = "The agent is stuck here: \(String(reason.prefix(140))). Do this part yourself, then tap Done."
+                            handOver.reason = reason
+                            self.steps[self.steps.count - 1].action = handOver
+                            return .ready(action: handOver, snapshot: rawSnapshot, observation: observation, fingerprint: nil, extracted: currentExtracted)
+                        }
+                        if !self.settings.handOverEnabled, self.wallPushbacks < Self.maxWallPushbacks {
+                            self.wallPushbacks += 1
+                            self.steps[self.steps.count - 1].status = .executed
+                            self.steps[self.steps.count - 1].result = "not giving up at this wall — hand-over is off, so the agent keeps working the page's own route"
+                            self.pendingRescueNote = "YOU TRIED TO STOP AT A WALL (\(String(reason.prefix(120)))). Handing the browser to the person is switched off, so keep going the way a person would: look for the page's own way past it — a continue, skip or guest option, closing an overlay, a different entry point, trying the step again, or another site that offers the same thing. Call fail again only when every such route is genuinely exhausted."
+                            Haptics.warning()
+                            return .loopContinue
+                        }
+                    }
                     if let target = self.rescueTarget(for: reason), index < self.maxStepsThisRun {
                         self.didOfferRescue = true
                         self.steps[self.steps.count - 1].status = .executed
@@ -955,7 +1048,9 @@ final class AgentViewModel {
                     break
                 }
 
-                if let refusal = self.refusalReason(for: resolvedAction) {
+                let refused = self.refusalReason(for: resolvedAction)
+                    ?? (resolvedAction.moves ?? []).lazy.compactMap { self.refusalReason(for: $0) }.first
+                if let refusal = refused {
                     self.steps[self.steps.count - 1].status = .rejected
                     self.steps[self.steps.count - 1].result = refusal
                     // Bar the identical call so a refused action is not
@@ -1000,6 +1095,18 @@ final class AgentViewModel {
                     await askPerson(resolvedAction)
                     guard !Task.isCancelled else {
                         finishRun(.stopped, "Stopped by you.", goal: goal)
+                        return
+                    }
+                    continue
+                }
+                if resolvedAction.kind == .handOver {
+                    let handedBack = await handOverToPerson(resolvedAction)
+                    guard !Task.isCancelled else {
+                        finishRun(.stopped, "Stopped by you.", goal: goal)
+                        return
+                    }
+                    if !handedBack {
+                        finishRun(.stopped, "You stopped the run during your turn.", goal: goal)
                         return
                     }
                     continue
@@ -1087,7 +1194,17 @@ final class AgentViewModel {
                     actExtracted = execution.extracted
                     self.lastResultLine = resultText
                     if actionSucceeded {
-                        self.recordExecutedMove(resolvedAction, fingerprint: fingerprint, result: resultText)
+                        if resolvedAction.kind == .sequence {
+                            // Each move of a sequence is its own step of the route.
+                            for (move, moveResult) in self.sequenceResults {
+                                let moveFingerprint = move.element
+                                    .flatMap { id in observation?.element(withID: id) }
+                                    .flatMap { element in observation.map { ElementFingerprint.make(for: element, in: $0) } }
+                                self.recordExecutedMove(move, fingerprint: moveFingerprint, result: moveResult)
+                            }
+                        } else {
+                            self.recordExecutedMove(resolvedAction, fingerprint: fingerprint, result: resultText)
+                        }
                         self.applyChecklist(from: resolvedAction)
                         self.noteOutcome(action: resolvedAction, result: resultText)
                     } else {
@@ -1290,7 +1407,12 @@ final class AgentViewModel {
         }
 
         let fresh = await webProxy.snapshot()
-        let pageText = await webProxy.extractText()
+        // The check reads the parts of the page that bear on the claim, not
+        // just its first few thousand characters.
+        let pageText = PageDigest.digest(
+            await webProxy.readWholePage(),
+            query: [plan?.successStatement ?? goal, claimed].joined(separator: " ")
+        )
         let checkModel = verificationModel()
         checkCallCount += 1
         countCall(on: checkModel)
@@ -2786,6 +2908,7 @@ final class AgentViewModel {
     /// tap into a list of results, any submit, and at each checklist task boundary.
     private func shouldCapture(before action: AgentAction) -> Bool {
         guard settings.bookmarksEnabled, !checkpointsUnavailable else { return false }
+        if let moves = action.moves, moves.contains(where: { shouldCapture(before: $0) }) { return true }
         if action.submit == true { return true }
         switch action.kind {
         case .navigate, .fillForm:
@@ -3202,8 +3325,35 @@ final class AgentViewModel {
             ).text
             return ("went back · \(verdict)", nil)
         case .extract:
-            let text = await webProxy.extractText()
-            return ("read a cleaned copy of the whole page (\(text.count) characters)", text)
+            let full = await webProxy.readWholePage()
+            if full.hasPrefix("extract error") || full.hasPrefix("js error") {
+                return (full, nil)
+            }
+            let reading = PageDigest.digest(full, query: action.query, startFrom: action.startFrom ?? 0)
+            let what = (action.query ?? "").isEmpty ? "a cleaned copy of the page" : "the parts of the page about “\(String((action.query ?? "").prefix(40)))”"
+            return ("read \(what) (\(reading.count) of \(full.count) characters)", reading)
+        case .listOptions:
+            guard let elementID = action.element else {
+                return ("list_options was missing its element number — look at the page and try again", nil)
+            }
+            let listing = await webProxy.listOptions(
+                id: elementID,
+                expectedName: lastObservation?.element(withID: elementID)?.name ?? ""
+            )
+            guard listing.hasPrefix("OPTIONS OF") else { return (listing, nil) }
+            return ("listed the choices of [\(elementID)] — shown on your next turn", listing)
+        case .findText:
+            let wanted = (action.text ?? "").trimmed
+            guard !wanted.isEmpty else {
+                return ("find_text was missing the text to look for", nil)
+            }
+            await webProxy.beginReactionWatch(targetID: nil)
+            let result = await webProxy.findText(wanted)
+            await webProxy.settleReaction(minimum: 0.3, maximum: 1.2)
+            _ = await webProxy.endReactionWatch()
+            return (result, nil)
+        case .sequence:
+            return await performSequence(action.moves ?? [])
         case .pageOverview:
             switch await webProxy.capturePageOverview() {
             case .captured(let image, let note):
@@ -3217,7 +3367,7 @@ final class AgentViewModel {
         case .wait:
             try? await Task.sleep(for: .seconds(2))
             return ("waited 2s", nil)
-        case .revisePlan, .rewind, .done, .fail, .askUser, .verify, .headStart, .replay, .mistake, .unknown:
+        case .revisePlan, .rewind, .done, .fail, .askUser, .handOver, .verify, .headStart, .replay, .mistake, .unknown:
             return ("no-op", nil)
         }
     }
@@ -3230,6 +3380,7 @@ final class AgentViewModel {
         onDevice.coolDown()
         resumeApproval(false)
         resumeQuestion(nil)
+        resumeHandOver(false)
 
         // Both of these are mechanical and free, so they happen on every finished
         // run rather than only the good ones — a run that went wrong is the one
@@ -3335,6 +3486,9 @@ final class AgentViewModel {
         }
         lines += steps.suffix(8).map { step -> String in
             var line = "\(step.displayNumber). \(step.action.kind.label) \(step.action.detailText)"
+            if let aim = step.action.nextGoal, !aim.isEmpty {
+                line += " [aim: \(String(aim.prefix(60)))]"
+            }
             if !step.reasoning.isEmpty {
                 line += " — \(String(step.reasoning.prefix(80)))"
             }
@@ -3526,6 +3680,211 @@ final class AgentViewModel {
         guard !personAnswers.isEmpty else { return nil }
         let header = "THE PERSON'S ANSWERS TO YOUR QUESTIONS (these speak for them and outrank your assumptions):"
         return ([header] + personAnswers.map { "- \($0)" }).joined(separator: "\n")
+    }
+
+    // MARK: - Noticing what changed
+
+    /// Marks controls that appeared since the last look and counts moves that
+    /// left the page exactly as it was. Both are free and read the scan only.
+    private func noticeChanges(in observation: PageObservation?) -> PageObservation? {
+        guard let observation else { return nil }
+        let url = webProxy.webView.url?.absoluteString ?? ""
+        let page = ScannedElement.pageKey(url)
+        let lastMove = steps.last(where: { $0.action.kind.isPageAction })?.action.kind
+
+        // New controls, only when the page stayed put: after a scroll or a new
+        // page everything would look new and the mark would mean nothing.
+        let movesTheView: Set<AgentActionKind> = [.scroll, .navigate, .back, .swipe, .findText, .pageOverview]
+        let keys = observation.elements.map { $0.targetKey(in: observation, urlString: url) }
+        var marked = observation
+        if page == lastElementPage, !lastElementKeys.isEmpty, let lastMove, !movesTheView.contains(lastMove) {
+            let elements = zip(observation.elements, keys).map { element, key -> ScannedElement in
+                var element = element
+                element.isNew = !element.name.trimmed.isEmpty && !lastElementKeys.contains(key)
+                return element
+            }
+            marked = observation.replacingElements(elements, blockedPanelCount: observation.blockedPanelCount)
+        }
+        lastElementKeys = Set(keys)
+        lastElementPage = page
+
+        // Stagnation: the page is byte-for-byte what it was, after a move that
+        // was meant to change something.
+        let print = observation.fingerprint(urlString: url)
+        let looksOnly: Set<AgentActionKind> = [.extract, .pageOverview, .listOptions, .wait, .askUser, .handOver, .findText]
+        if print == lastFingerprint, let lastMove, !looksOnly.contains(lastMove) {
+            stagnantSteps += 1
+        } else {
+            stagnantSteps = 0
+        }
+        lastFingerprint = print
+        return marked
+    }
+
+    /// Everything the briefing should say about being stuck or nudged this step.
+    private func combinedNudge() -> String? {
+        var notes: [String] = []
+        if let stuck = stuckNudge() { notes.append(stuck) }
+        if stagnantSteps >= 2 {
+            notes.append("PAGE UNCHANGED: your last \(stagnantSteps) moves left this page exactly as it was. They are not working here — try a different control, a different way in, or read the page (extract / find_text) to find the real route.")
+        }
+        if let task = pendingTaskNote {
+            notes.append(task)
+            pendingTaskNote = nil
+        }
+        if let handBack = pendingHandBackNote {
+            notes.append(handBack)
+            pendingHandBackNote = nil
+        }
+        return notes.isEmpty ? nil : notes.joined(separator: "\n")
+    }
+
+    // MARK: - Checking ticked tasks
+
+    /// The claimed tasks the check accepts. A task the check rejects stays open
+    /// and its reason goes into the next briefing; after a couple of checks the
+    /// agent's own tick is accepted rather than spending more. If the check
+    /// cannot run at all, the tick stands — a network error must not freeze the
+    /// checklist.
+    private func checkedTaskClaims(_ claimed: [Int], goal: String, snapshot: UIImage?) async -> [Int] {
+        guard settings.verifyBeforeDone, let plan else { return claimed }
+        var accepted: [Int] = []
+        var objections: [String] = []
+        var reading: String?
+
+        for number in claimed {
+            guard let task = plan.task(numbered: number) else { continue }
+            if task.state == .done || taskChecks[number, default: 0] >= Self.maxTaskChecks {
+                accepted.append(number)
+                continue
+            }
+            taskChecks[number, default: 0] += 1
+            if reading == nil { reading = await webProxy.readWholePage() }
+            let focused = PageDigest.digest(reading ?? "", query: "\(task.title) \(task.doneWhen)", budget: 4_000)
+            countCall(on: .fast)
+            do {
+                let result = try await ai.checkTask(AIService.TaskCheckRequest(
+                    goal: goal,
+                    taskTitle: task.title,
+                    doneWhen: task.doneWhen,
+                    urlString: webProxy.webView.url?.absoluteString ?? "",
+                    pageTitle: webProxy.webView.title ?? "",
+                    pageText: focused,
+                    imageBase64: snapshot.map { Self.jpegBase64(from: $0) } ?? "",
+                    modelID: ModelChoice.fast.modelID
+                ))
+                if result.done {
+                    accepted.append(number)
+                } else {
+                    objections.append("task \(number) (\(task.title)): \(result.why)")
+                }
+            } catch {
+                guard !(Task.isCancelled || error is CancellationError) else { return claimed }
+                AppLog.ai.warning("Task check could not run; keeping the agent's tick for task \(number, privacy: .public)")
+                accepted.append(number)
+            }
+        }
+        if !objections.isEmpty {
+            pendingTaskNote = "NOT TICKED — the check could not see these tasks finished: \(objections.joined(separator: "; ")). Finish them, or show the evidence, before ticking them again."
+        }
+        return accepted
+    }
+
+    // MARK: - Several moves in one turn
+
+    /// Plays a do_sequence move by move. Stops at the first move that fails,
+    /// or as soon as the page changes before the last move — the moves after
+    /// it were aimed at a page that is no longer there.
+    private func performSequence(_ moves: [AgentAction]) async -> (result: String, extracted: String?) {
+        sequenceResults = []
+        guard !moves.isEmpty else { return ("do_sequence had no moves", nil) }
+        let startURL = webProxy.webView.url?.absoluteString ?? ""
+        var lines: [String] = []
+        for (offset, move) in moves.enumerated() {
+            guard !Task.isCancelled else { break }
+            let outcome = await performAction(move)
+            sequenceResults.append((move, outcome.result))
+            lines.append("\(offset + 1)) \(outcome.result)")
+            let isLast = offset == moves.count - 1
+            if ReactionWatch.readsAsFailure(outcome.result) {
+                if !isLast { lines.append("the remaining \(moves.count - offset - 1) move(s) were not tried because this one did not work") }
+                break
+            }
+            if !isLast, (webProxy.webView.url?.absoluteString ?? "") != startURL {
+                lines.append("the page changed after move \(offset + 1), so the remaining \(moves.count - offset - 1) move(s) were not tried — look again")
+                break
+            }
+        }
+        return (lines.joined(separator: " | "), nil)
+    }
+
+    // MARK: - Your turn
+
+    /// Hands the browser to you and waits until you hand it back. The page you
+    /// leave is what the agent works from next; it is told what you did.
+    /// Returns false when you stop the run instead.
+    private func handOverToPerson(_ action: AgentAction) async -> Bool {
+        let last = steps.count - 1
+        guard last >= 0 else { return true }
+        guard settings.handOverEnabled, handOversUsed < Self.maxHandOvers else {
+            steps[last].status = .failed
+            steps[last].result = "hand-over is not available now — keep working the page's own route"
+            return true
+        }
+        handOversUsed += 1
+        let instruction = (action.instruction ?? "").trimmed.isEmpty
+            ? "Do the part the agent could not, then tap Done."
+            : (action.instruction ?? "")
+        pendingHandOver = instruction
+        phase = .yourTurn
+        Haptics.warning()
+        let handedBack = await waitForHandBack()
+        pendingHandOver = nil
+        guard !Task.isCancelled else { return false }
+        steps[last].status = handedBack ? .executed : .rejected
+        steps[last].result = handedBack
+            ? "you took over (\(String(instruction.prefix(80)))) and handed back"
+            : "you stopped the run during your turn"
+        guard handedBack else { return false }
+        phase = .acting
+        lastObservation = nil
+        lastFingerprint = nil
+        stagnantSteps = 0
+        pendingHandBackNote = "THE PERSON TOOK OVER THE BROWSER for: \(String(instruction.prefix(160))) — and handed it back. Look at the page fresh: it may have moved on, and anything they entered stands."
+        lastResultLine = steps[last].result
+        return true
+    }
+
+    /// You tapped Done (true) or Stop (false) on your turn.
+    func finishYourTurn(handBack: Bool) {
+        Haptics.medium()
+        resumeHandOver(handBack)
+    }
+
+    private func waitForHandBack() async -> Bool {
+        if handOverContinuation != nil {
+            resumeHandOver(false)
+        }
+        guard !Task.isCancelled else { return false }
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if Task.isCancelled {
+                    continuation.resume(returning: false)
+                } else {
+                    handOverContinuation = continuation
+                }
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                self?.resumeHandOver(false)
+            }
+        }
+    }
+
+    private func resumeHandOver(_ handBack: Bool) {
+        guard let continuation = handOverContinuation else { return }
+        handOverContinuation = nil
+        continuation.resume(returning: handBack)
     }
 
     // MARK: - Asking you

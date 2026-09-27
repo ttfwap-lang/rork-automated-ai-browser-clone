@@ -62,7 +62,8 @@ struct ContentView: View {
         // following the reasoning are the same act. Only the panel's own frame
         // takes taps — everything around it lands on the page.
         .overlay(alignment: .top) {
-            if agent.isRunning {
+            // Hidden on your turn: the page is yours, top to bottom.
+            if agent.isRunning && agent.phase != .yourTurn {
                 LiveThinkingPanel()
             }
         }
@@ -85,6 +86,13 @@ struct ContentView: View {
 
             if agent.pendingQuestion != nil {
                 QuestionCard()
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+
+            if agent.pendingHandOver != nil {
+                HandOverCard()
                     .padding(.horizontal, 16)
                     .padding(.top, 8)
                     .transition(.move(edge: .bottom).combined(with: .opacity))

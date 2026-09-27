@@ -17,6 +17,8 @@ nonisolated enum DifficultyScout {
         let taskStuckCount: Int
         /// True when the independent check just rejected a claim.
         let hasObjection: Bool
+        /// Moves in a row that left the page exactly as it was.
+        let stagnantSteps: Int
 
         init(
             isFirstStep: Bool,
@@ -24,7 +26,8 @@ nonisolated enum DifficultyScout {
             lastResult: String? = nil,
             isRepeating: Bool = false,
             taskStuckCount: Int = 0,
-            hasObjection: Bool = false
+            hasObjection: Bool = false,
+            stagnantSteps: Int = 0
         ) {
             self.isFirstStep = isFirstStep
             self.observation = observation
@@ -32,6 +35,7 @@ nonisolated enum DifficultyScout {
             self.isRepeating = isRepeating
             self.taskStuckCount = taskStuckCount
             self.hasObjection = hasObjection
+            self.stagnantSteps = stagnantSteps
         }
     }
 
@@ -75,6 +79,10 @@ nonisolated enum DifficultyScout {
         if signals.isRepeating {
             score += 2
             reasons.append("the same move keeps repeating")
+        }
+        if signals.stagnantSteps >= 2 {
+            score += 2
+            reasons.append("the page has not changed in \(signals.stagnantSteps) moves")
         }
         if signals.hasObjection {
             score += 2
