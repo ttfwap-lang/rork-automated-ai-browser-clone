@@ -63,8 +63,9 @@ extension AIService {
             system: Self.repairPrompt,
             parts: [.text(Self.repairContext(for: request))],
             tools: [Self.pickReplacementTool],
-            maxTokens: 300,
-            temperature: 0.1
+            maxTokens: 2_048,
+            temperature: 0.0,
+            effort: "low"
         )
 
         guard let call = message.toolCalls?.first,

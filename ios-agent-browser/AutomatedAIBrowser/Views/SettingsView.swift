@@ -16,11 +16,15 @@ struct SettingsView: View {
     @State private var confirmForget = false
     @State private var confirmForgetLessons = false
     @State private var confirmForgetRoutines = false
+    @State private var gatewayProfile = GatewayProfile.current
+    @State private var gatewayReport: [String] = []
+    @State private var probing = false
 
     var body: some View {
         NavigationStack {
             Form {
                 modeSection
+                benchmarkSection
                 railsSection
                 planningSection
                 checkSection
@@ -32,6 +36,7 @@ struct SettingsView: View {
                 dossierSection
                 judgmentSection
                 modelSection
+                gatewaySection
                 dataSection
                 limitsSection
             }
@@ -102,7 +107,7 @@ struct SettingsView: View {
     private var railsSection: some View {
         @Bindable var settings = settings
         return Section {
-            Stepper("Max steps per run: \(settings.maxSteps)", value: $settings.maxSteps, in: 5...25)
+            Stepper("Max steps per run: \(settings.maxSteps)", value: $settings.maxSteps, in: AppSettings.stepRange)
         } header: {
             Text("Safety Rails")
         } footer: {
@@ -295,6 +300,52 @@ struct SettingsView: View {
             Text("Preferred Model")
         } footer: {
             Text("Used for normal steps under Auto, and for every step when the strategy is Always. Each step sends one page snapshot and uses a small amount of Rork AI Cloud credits.")
+        }
+    }
+
+    private var benchmarkSection: some View {
+        @Bindable var settings = settings
+        return Section {
+            Toggle("Benchmark mode", isOn: $settings.benchmarkMode)
+        } header: {
+            Text("Benchmark")
+        } footer: {
+            Text("The strongest unattended setup: every step on the precise model at medium thinking effort, no on-device tier, at least \(AppSettings.benchmarkMinSteps) steps, the independent check always on, and no hand-over. Slower and costlier per step, fewer wrong turns.")
+        }
+    }
+
+    private var gatewaySection: some View {
+        Section {
+            Text(gatewayProfile.summary)
+                .font(.footnote)
+            ForEach(gatewayReport, id: \.self) { line in
+                Text(line)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Button {
+                probing = true
+                Task {
+                    let report = await AIService().probeGateway()
+                    report.profile.save()
+                    gatewayProfile = report.profile
+                    gatewayReport = report.lines
+                    probing = false
+                }
+            } label: {
+                HStack {
+                    Text(probing ? "Testing…" : "Test what the gateway supports")
+                    if probing {
+                        Spacer()
+                        ProgressView()
+                    }
+                }
+            }
+            .disabled(probing)
+        } header: {
+            Text("AI Gateway")
+        } footer: {
+            Text("Makes about six small calls to the precise model to see whether thinking effort and prompt caching reach Claude through the gateway. Only what passes is used. Temperature is never sent to Claude.")
         }
     }
 

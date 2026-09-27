@@ -1,7 +1,9 @@
 import Foundation
 
-/// Decides which model gets each step. Routine steps go to the fast model; every
-/// decision that actually matters stays on the frontier one.
+/// Decides which model gets each step. Under Auto, the cloud steps of a run stay
+/// on your preferred model — switching models between steps loses the prompt
+/// cache and the model's own line of thought — and hard or risky steps are
+/// always on the frontier one.
 nonisolated enum ModelRouter {
 
     nonisolated struct Route: Hashable {
@@ -74,7 +76,7 @@ nonisolated enum ModelRouter {
             if inputs.onDeviceReady {
                 return Route(choice: .onDevice, reason: "routine step — free, on your iPhone", isForced: false)
             }
-            return Route(choice: .fast, reason: "routine step", isForced: false)
+            return Route(choice: inputs.preferred, reason: "routine step — your preference", isForced: false)
         case .normal:
             return Route(choice: inputs.preferred, reason: "normal step — your preference", isForced: false)
         }

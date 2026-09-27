@@ -53,6 +53,11 @@ nonisolated struct PageObservation {
         "\(urlString)|\(elements.count)|\(Int((scrollFraction * 20).rounded()))|\(textSignature)"
     }
 
+    /// The listed controls actually on screen right now.
+    var visibleElements: [ScannedElement] {
+        elements.filter { $0.offscreen == nil }
+    }
+
     /// True when any element on screen is new since the agent's last look.
     var hasNewElements: Bool { elements.contains(where: \.isNew) }
 
@@ -66,7 +71,7 @@ nonisolated struct PageObservation {
         if elements.isEmpty {
             lines.append("ELEMENTS ON SCREEN: none detected — the page may still be loading, or it draws fully custom controls. Use the coordinate \"tap\" tool if you must interact.")
         } else {
-            lines.append("ELEMENTS ON SCREEN (numbers match the badges drawn on the screenshot):")
+            lines.append("ELEMENTS (numbers match the badges drawn on the screenshot):")
             for element in elements {
                 lines.append(element.mapLine)
             }
@@ -75,6 +80,9 @@ nonisolated struct PageObservation {
             }
             if hasNewElements {
                 lines.append("(* marks controls that appeared since your last look — often the menu, list or dialog your last move opened.)")
+            }
+            if elements.contains(where: { $0.offscreen != nil }) {
+                lines.append("Elements marked (above/below \u{2014} scrolls itself) are off screen: tap_element, type_into and the other element moves bring them into view themselves, so never scroll just to reach one.")
             }
             if elements.contains(where: { $0.panelLabel != nil }) {
                 lines.append("Elements marked (in embedded panel: …) sit inside embedded widgets — tap_element, type_into, and the other element moves work on them normally.")
@@ -109,7 +117,7 @@ nonisolated struct PageObservation {
             line = "VIEW: \(phrase)"
         }
         let belowWord = elementsBelow == 1 ? "element" : "elements"
-        line += " — \(elementsBelow) interactive \(belowWord) below the visible area, \(elementsAbove) above."
+        line += " — \(elementsBelow) more interactive \(belowWord) below the visible area and \(elementsAbove) above, not listed."
         return line
     }
 }

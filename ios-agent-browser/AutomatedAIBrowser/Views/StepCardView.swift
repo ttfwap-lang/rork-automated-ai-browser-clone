@@ -163,6 +163,17 @@ struct StepCardView: View {
                     .foregroundStyle(Theme.green)
                 }
 
+                if let timing = step.timingLine, !timing.isEmpty {
+                    HStack(spacing: 4) {
+                        Image(systemName: "stopwatch")
+                            .font(.system(size: 7, weight: .bold))
+                        Text(timing)
+                            .font(.system(size: 9, design: .monospaced))
+                            .lineLimit(2)
+                    }
+                    .foregroundStyle(Theme.textSecondary)
+                }
+
                 if let title = step.taskTitle, let number = step.taskNumber, !step.isCheckEntry {
                     HStack(spacing: 4) {
                         Image(systemName: "list.bullet")

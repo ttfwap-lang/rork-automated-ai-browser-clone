@@ -51,6 +51,8 @@ struct AgentStep: Identifiable {
     var destinationSnapshot: UIImage? = nil
     /// True once this step's stored images have been shrunk for memory.
     var imagesTrimmed = false
+    /// Where this step's time went and what its AI calls cost.
+    var timingLine: String? = nil
     let timestamp = Date()
 
     /// True for the app's own independent-check log entry.

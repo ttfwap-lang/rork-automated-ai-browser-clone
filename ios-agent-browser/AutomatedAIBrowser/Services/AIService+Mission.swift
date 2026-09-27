@@ -214,8 +214,9 @@ extension AIService {
             system: Self.plannerPrompt,
             parts: [.text(context)],
             tools: [Self.writePlanTool],
-            maxTokens: 900,
-            temperature: 0.3,
+            maxTokens: 4_096,
+            temperature: 0.2,
+            effort: "high",
             onRetry: onRetry
         )
 
@@ -276,8 +277,9 @@ extension AIService {
             system: Self.taskCheckPrompt,
             parts: parts,
             tools: [Self.reportTaskTool],
-            maxTokens: 200,
-            temperature: 0.0
+            maxTokens: 2_048,
+            temperature: 0.0,
+            effort: "low"
         )
         guard let call = message.toolCalls?.first,
               let function = call.function,
@@ -350,8 +352,9 @@ extension AIService {
             system: Self.verifierPrompt,
             parts: parts,
             tools: [Self.reportVerdictTool],
-            maxTokens: 700,
+            maxTokens: 4_096,
             temperature: 0.0,
+            effort: "high",
             onRetry: onRetry
         )
 

@@ -118,7 +118,7 @@ struct BorrowedIdeasTests {
         )
         #expect(decision?.action.previousMove == "failed")
         #expect(decision?.action.nextGoal == "open the filter panel")
-        let tools = AIService.tools(hasPlan: false)
+        let tools = AIService.tools()
         #expect(tools.allSatisfy { $0.function.parameters.properties["previous_move"] != nil })
     }
 
@@ -165,9 +165,11 @@ struct BorrowedIdeasTests {
         #expect(!ModelRouter.isCommitting(sequence, in: observation))
     }
 
-    @Test func handOverIsOfferedOnlyWhenSwitchedOn() {
-        #expect(AIService.tools(hasPlan: false, canHandOver: true).contains { $0.function.name == "hand_over" })
-        #expect(!AIService.tools(hasPlan: false).contains { $0.function.name == "hand_over" })
+    @Test func handOverIsUsableOnlyWhenSwitchedOn() {
+        #expect(AIService.tools().contains { $0.function.name == "hand_over" })
+        #expect(AIService.availabilityLine(canHandOver: true).contains("every page move, hand_over."))
+        #expect(AIService.availabilityLine().contains("hand_over."))
+        #expect(!AIService.availabilityLine().contains("USABLE THIS TURN: every page move, hand_over"))
         #expect(AgentActionKind.handOver.isPageAction == false)
         let decision = AIService.decision(
             fromToolNamed: "hand_over",
@@ -177,7 +179,7 @@ struct BorrowedIdeasTests {
     }
 
     @Test func theToolsForLookingAreOnOffer() {
-        let names = Set(AIService.tools(hasPlan: false).map(\.function.name))
+        let names = Set(AIService.tools().map(\.function.name))
         #expect(names.isSuperset(of: ["list_options", "find_text", "do_sequence", "extract"]))
     }
 

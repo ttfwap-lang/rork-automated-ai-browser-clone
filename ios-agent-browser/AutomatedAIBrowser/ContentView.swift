@@ -17,16 +17,24 @@ struct ContentView: View {
             Theme.bg.ignoresSafeArea()
 
             VStack(spacing: 0) {
-                TopBar(
-                    onDossier: { presentAuxiliary { showDossier = true } },
-                    onMemory: { presentAuxiliary { showMemory = true } },
-                    onHistory: { presentAuxiliary { showHistory = true } },
-                    onSettings: { presentAuxiliary { showSettings = true } }
-                )
-                BrowserToolbar()
+                // During a run the page gets the room: the agent sees and lists
+                // more of it per look, which means fewer scrolling steps. The
+                // bars come back on your turn and when the run ends.
+                if showsChrome {
+                    TopBar(
+                        onDossier: { presentAuxiliary { showDossier = true } },
+                        onMemory: { presentAuxiliary { showMemory = true } },
+                        onHistory: { presentAuxiliary { showHistory = true } },
+                        onSettings: { presentAuxiliary { showSettings = true } }
+                    )
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                    BrowserToolbar()
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                }
                 browserArea
                 bottomDock
             }
+            .animation(.spring(response: 0.35, dampingFraction: 0.85), value: showsChrome)
         }
         .sheet(isPresented: $agent.isFeedPresented) {
             ActionFeedSheet()
@@ -57,6 +65,10 @@ struct ContentView: View {
         .onAppear {
             agent.loadHomepageIfNeeded()
         }
+    }
+
+    private var showsChrome: Bool {
+        !agent.isRunning || agent.phase == .yourTurn
     }
 
     private var browserArea: some View {

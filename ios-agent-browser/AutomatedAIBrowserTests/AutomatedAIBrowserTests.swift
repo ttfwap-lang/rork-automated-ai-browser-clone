@@ -140,7 +140,7 @@ struct AutomatedAIBrowserTests {
         let map = observation?.mapText ?? ""
         #expect(map.contains(#"[1] button "Accept all""#))
         #expect(map.contains("(empty, required)"))
-        #expect(map.contains("42 interactive elements below"))
+        #expect(map.contains("42 more interactive elements below"))
         #expect(map.contains("overlay") || map.contains("dialog"))
         #expect(map.contains("+3 more"))
     }
@@ -663,10 +663,12 @@ struct AutomatedAIBrowserTests {
         ))
     }
 
-    @Test func routineStepsGoToTheFastModelEvenForPreciseUsers() {
+    @Test func routineStepsStayOnThePreferredModel() {
+        // One model for the cloud steps of a run keeps its prompt cache warm.
         let route = routed(.routine, preferred: .precise)
-        #expect(route.choice == .fast)
+        #expect(route.choice == .precise)
         #expect(route.isForced == false)
+        #expect(routed(.routine, preferred: .fast).choice == .fast)
     }
 
     @Test func everyForcedFrontierRuleHolds() {
@@ -1351,7 +1353,7 @@ struct AutomatedAIBrowserTests {
             )).choice
         }
         #expect(choice(.routine, freeReady: true) == .onDevice)
-        #expect(choice(.routine, freeReady: false) == .fast)
+        #expect(choice(.routine, freeReady: false) == .precise)
         #expect(choice(.normal, freeReady: true) == .precise)
         #expect(choice(.hard, freeReady: true) == .precise)
     }
@@ -1392,7 +1394,7 @@ struct AutomatedAIBrowserTests {
         )
         #expect(ModelRouter.route(inputs).choice == .onDevice)
         // The step falls back here when a free answer is rejected.
-        #expect(ModelRouter.cloudRoute(inputs).choice == .fast)
+        #expect(ModelRouter.cloudRoute(inputs).choice == .precise)
 
         let always = ModelRouter.Inputs(
             strategy: .alwaysFast,
@@ -3030,13 +3032,12 @@ struct AutomatedAIBrowserTests {
         #expect(action.plainSentence.contains("and submit"))
     }
 
-    @Test func theDossierMoveIsRemovedFromTheToolSetWhenItCannotBeUsed() {
-        let withDossier = AIService.tools(hasPlan: false, hasDossier: true).map { $0.function.name }
-        let without = AIService.tools(hasPlan: false, hasDossier: false).map { $0.function.name }
-        #expect(withDossier.contains("fill_from_dossier"))
-        #expect(!without.contains("fill_from_dossier"))
-        #expect(without.contains("type_into"), "every other move stays exactly as it was")
-        #expect(withDossier.count == without.count + 1)
+    @Test func theDossierMoveIsAlwaysListedButMarkedUnusableWhenItCannotBeUsed() {
+        let names = AIService.tools().map { $0.function.name }
+        #expect(names.contains("fill_from_dossier"))
+        #expect(names.contains("type_into"))
+        #expect(AIService.availabilityLine(hasDossier: true).contains("every page move, fill_from_dossier"))
+        #expect(AIService.availabilityLine(hasDossier: false).contains("NOT AVAILABLE NOW: fill_from_dossier"))
     }
 
     @Test func theDossierFillCallParsesWithNoValuesInIt() {

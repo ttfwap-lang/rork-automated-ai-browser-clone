@@ -101,7 +101,7 @@ nonisolated enum DifficultyScout {
             reasons.append("part of the page couldn't be scanned")
         }
 
-        let names = observation.elements
+        let names = observation.visibleElements
             .map { $0.name.trimmed.lowercased() }
             .filter { !$0.isEmpty }
         var counts: [String: Int] = [:]
@@ -112,15 +112,17 @@ nonisolated enum DifficultyScout {
             score += 1
             reasons.append("several targets on screen look the same")
         }
-        if observation.elements.count > busyPageElementCount {
+        // Only what is on screen: listing off-screen controls too must not make
+        // every long page read as "busy".
+        if observation.visibleElements.count > busyPageElementCount {
             score += 1
-            reasons.append("a busy page with \(observation.elements.count) choices")
+            reasons.append("a busy page with \(observation.visibleElements.count) choices")
         }
 
         // Informational only. A "Buy now" button somewhere on screen says nothing
         // about whether THIS step will press it; the loop checks the move the
         // model actually chose, and escalates that one if it commits.
-        let isIrreversible = observation.elements.contains { element in
+        let isIrreversible = observation.visibleElements.contains { element in
             guard element.kind == .button || element.kind == .link else { return false }
             return OnDeviceGate.isIrreversible(element.name)
         }
@@ -136,7 +138,7 @@ nonisolated enum DifficultyScout {
         if difficulty == .routine {
             return DifficultyRead(
                 difficulty: .routine,
-                reasons: ["a simple page with \(observation.elements.count) choices"] + (isIrreversible ? [irreversibleReason] : []),
+                reasons: ["a simple page with \(observation.visibleElements.count) choices"] + (isIrreversible ? [irreversibleReason] : []),
                 isIrreversible: isIrreversible,
                 isFlyingBlind: false
             )

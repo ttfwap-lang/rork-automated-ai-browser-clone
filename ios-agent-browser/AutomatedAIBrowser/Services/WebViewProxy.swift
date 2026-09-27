@@ -125,6 +125,13 @@ final class WebViewProxy: NSObject, WKNavigationDelegate, WKUIDelegate {
         _ = await runJS(ReactionWatch.markBaselineScript)
     }
 
+    /// Starts the reaction watcher's idle baseline from now, without waiting.
+    /// Used when the last move has only just settled on this same page, so a
+    /// second wait for quiet would only repeat the one that just finished.
+    func markBaseline() async {
+        _ = await runJS(ReactionWatch.markBaselineScript)
+    }
+
     /// Waits at least `minimum`, then until the page has had no real change for
     /// a moment and no request it sent is still out, or until `maximum`.
     func settle(minimum: TimeInterval, maximum: TimeInterval, in frame: WKFrameInfo? = nil) async {

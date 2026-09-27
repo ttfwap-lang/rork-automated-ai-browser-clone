@@ -28,6 +28,8 @@ nonisolated struct PersistedStep: Codable, Identifiable, Hashable {
     var wasHealed: Bool? = nil
     /// What the free field matching worked out on a dossier fill.
     var dossierNote: String? = nil
+    /// Where the step's time went and what its AI calls cost.
+    var timingLine: String? = nil
 
     var kind: AgentActionKind {
         AgentActionKind(rawValue: actionType) ?? .unknown

@@ -57,8 +57,9 @@ extension AIService {
             system: Self.labelPrompt,
             parts: [.text(context)],
             tools: [Self.labelRouteTool],
-            maxTokens: 300,
-            temperature: 0.2
+            maxTokens: 2_048,
+            temperature: 0.2,
+            effort: "low"
         )
 
         guard let call = message.toolCalls?.first,

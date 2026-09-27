@@ -70,7 +70,7 @@ final class OnDeviceModel {
     // MARK: - Prose
 
     /// Asks for one short prose answer, one request at a time. Never throws.
-    func ask(instructions: String, prompt: String) async -> OnDeviceAnswer {
+    func ask(instructions: String, prompt: String, timeout: Duration = OnDeviceModel.timeout) async -> OnDeviceAnswer {
         refresh()
         guard state.isReady else { return .unavailable(state) }
         guard !isBusy else { return .failed("your iPhone's model was already busy") }
@@ -83,7 +83,7 @@ final class OnDeviceModel {
 
         switch await Self.race(
             perform: { try await session.respond(to: prompt).content },
-            budget: Self.timeout
+            budget: timeout
         ) {
         case .success(let answer):
             let text = answer.trimmed

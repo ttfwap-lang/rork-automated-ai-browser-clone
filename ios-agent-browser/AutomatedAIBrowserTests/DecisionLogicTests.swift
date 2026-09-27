@@ -263,7 +263,7 @@ struct DecisionLogicTests {
         #expect(decision?.action.notedFacts?.count == 1)
         #expect(decision?.action.notedFacts?.first?.quote == "$348.00")
         #expect(decision?.action.notedFacts?.first?.urlString == nil, "provenance is the app's to set")
-        #expect(AIService.tools(hasPlan: false).allSatisfy { $0.function.parameters.properties["note_facts"] != nil })
+        #expect(AIService.tools().allSatisfy { $0.function.parameters.properties["note_facts"] != nil })
     }
 
     @Test func aNoteNeedsBothAFactAndAQuote() throws {
@@ -275,9 +275,12 @@ struct DecisionLogicTests {
         #expect(fact.ledgerLine.contains("$348.00"))
     }
 
-    @Test func askUserIsOfferedOnlyWhileQuestionsRemain() {
-        #expect(AIService.tools(hasPlan: false, canAskUser: true).contains { $0.function.name == "ask_user" })
-        #expect(!AIService.tools(hasPlan: false).contains { $0.function.name == "ask_user" })
+    @Test func askUserIsUsableOnlyWhileQuestionsRemain() {
+        // Always listed (a stable tool list can be cached); the turn's briefing
+        // says whether it can be used.
+        #expect(AIService.tools().contains { $0.function.name == "ask_user" })
+        #expect(AIService.availabilityLine(canAskUser: true).contains("USABLE THIS TURN: every page move, ask_user"))
+        #expect(AIService.availabilityLine().contains("NOT AVAILABLE NOW: fill_from_dossier, revise_plan, rewind, weigh_options, ask_user, hand_over"))
         let decision = AIService.decision(
             fromToolNamed: "ask_user",
             argumentsJSON: #"{"reasoning":"two sizes","question":"Which size?","choices":["M","L",""]}"#

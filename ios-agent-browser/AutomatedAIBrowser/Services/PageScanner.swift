@@ -5,10 +5,11 @@ import Foundation
 ///
 /// The scan script walks the whole DOM (including shadow roots), catalogs every
 /// interactive element that a finger could actually press right now (visible,
-/// rendered, not covered), numbers them in reading order, registers them on
-/// `window.__rorkAgent` for later targeting, and returns a compact JSON payload
-/// with element details and page vitals. It self-limits to a ~150 ms budget and
-/// ~120 elements so observations stay fast on any page.
+/// rendered, not covered), numbers them in reading order, then adds the nearest
+/// controls above and below the screen (element moves scroll to them), registers
+/// them on `window.__rorkAgent` for later targeting, and returns a compact JSON
+/// payload with element details and page vitals. It self-limits to a ~150 ms
+/// budget, ~120 on-screen and ~150 total elements so observations stay fast.
 nonisolated enum PageScanner {
 
     // MARK: - Scan
@@ -42,6 +43,11 @@ nonisolated enum PageScanner {
             scanned.context = nonEmpty(element.c)
             scanned.linkHint = nonEmpty(element.h)
             scanned.inputType = nonEmpty(element.t)
+            switch element.o {
+            case "a": scanned.offscreen = "above"
+            case "b": scanned.offscreen = "below"
+            default: break
+            }
             return scanned
         }
         return PageObservation(
@@ -91,6 +97,8 @@ nonisolated enum PageScanner {
         let h: String?
         /// Input type for non-text fields, e.g. "email".
         let t: String?
+        /// "a" above or "b" below the visible area; absent when on screen.
+        let o: String?
     }
 
     private static func nonEmpty(_ value: String?) -> String? {
@@ -653,19 +661,22 @@ nonisolated enum PageScanner {
 
             var above = 0, below = 0;
             var vis = [];
+            var off = [];
             for (var ci = 0; ci < cands.length && ci < LOOP_MAX; ci++) {
               var cel = cands[ci];
               var r;
               try { r = cel.getBoundingClientRect(); } catch (e) { continue; }
               if (r.width < 6 || r.height < 6) { continue; }
-              if (r.bottom <= 0) { above++; continue; }
-              if (r.top >= vh) { below++; continue; }
-              if (r.right <= 0 || r.left >= vw) { continue; }
+              var inColumn = r.right > 0 && r.left < vw;
+              if (r.bottom <= 0) { above++; if (inColumn) { off.push({ el: cel, r: r, side: 'a', d: -r.bottom }); } continue; }
+              if (r.top >= vh) { below++; if (inColumn) { off.push({ el: cel, r: r, side: 'b', d: r.top - vh }); } continue; }
+              if (!inColumn) { continue; }
               var visW = Math.min(r.right, vw) - Math.max(r.left, 0);
               var visH = Math.min(r.bottom, vh) - Math.max(r.top, 0);
               if (visW <= 0 || visH <= 0) { continue; }
               if (visW * visH < 0.5 * r.width * r.height) {
-                if (r.top >= vh / 2) { below++; } else { above++; }
+                if (r.top >= vh / 2) { below++; off.push({ el: cel, r: r, side: 'b', d: 0 }); }
+                else { above++; off.push({ el: cel, r: r, side: 'a', d: 0 }); }
                 continue;
               }
               var cs2;
@@ -713,6 +724,37 @@ nonisolated enum PageScanner {
             }
 
             if (kept.length > MAX) { moreVisible += kept.length - MAX; kept = kept.slice(0, MAX); }
+
+            // Controls just off screen, nearest first, so the agent can use them
+            // without spending a step scrolling. No hit-test (nothing covers what
+            // is not drawn yet); the element moves scroll them into view.
+            var OFF_TOTAL = 150, OFF_BUDGET = 40, offStart = Date.now();
+            off.sort(function(a, b) { return a.d - b.d; });
+            var offKept = [];
+            var offRoom = Math.max(0, OFF_TOTAL - kept.length);
+            for (var oi = 0; oi < off.length && offKept.length < offRoom; oi++) {
+              if (Date.now() - offStart > OFF_BUDGET) { break; }
+              var oc = off[oi];
+              var ocs;
+              try { ocs = getComputedStyle(oc.el); } catch (e) { continue; }
+              if (ocs.visibility === 'hidden' || ocs.display === 'none') { continue; }
+              if (parseFloat(ocs.opacity || '1') < 0.05) { continue; }
+              if (oc.el.closest && oc.el.closest('[aria-hidden="true"]')) { continue; }
+              oc.k = kindOf(oc.el);
+              var nested = false;
+              for (var on = 0; on < offKept.length && !nested; on++) {
+                var other = offKept[on];
+                try {
+                  if (other.el.contains(oc.el) && (oc.k === other.k || oc.k === 'other')) { nested = true; }
+                  else if (oc.el.contains(other.el) && oc.k === 'other') { nested = true; }
+                } catch (e) {}
+              }
+              if (nested) { continue; }
+              offKept.push(oc);
+              if (oc.side === 'a') { above--; } else { below--; }
+            }
+            offKept.sort(function(a, b) { return (a.r.top - b.r.top) || (a.r.left - b.r.left); });
+            kept = kept.concat(offKept);
 
             // Look-alikes ("Add to cart" x4) and unlabeled controls are useless
             // to the model without saying WHICH one: give those the nearest
@@ -785,7 +827,8 @@ nonisolated enum PageScanner {
                 r: [Math.round(it.r.left), Math.round(it.r.top), Math.round(it.r.width), Math.round(it.r.height)],
                 c: ctx,
                 h: href,
-                t: inputTypeOf(it.el, it.k)
+                t: inputTypeOf(it.el, it.k),
+                o: it.side || ''
               });
             }
 
@@ -832,7 +875,7 @@ nonisolated enum PageScanner {
             } catch (e) {}
 
             return JSON.stringify({
-              ok: true, vw: vw, vh: vh, sf: sf, dh: dh, ab: above, be: below,
+              ok: true, vw: vw, vh: vh, sf: sf, dh: dh, ab: Math.max(0, above), be: Math.max(0, below),
               more: moreVisible, ov: overlay, partial: timedOut, els: els, th: th, tl: tl
             });
           } catch (err) {

@@ -87,6 +87,17 @@ final class AppSettings {
         didSet { UserDefaults.standard.set(handOverEnabled, forKey: Keys.handOver) }
     }
 
+    /// Benchmark mode: every step on the precise model at medium effort, no
+    /// on-device tier, at least `benchmarkMinSteps` steps, the independent check
+    /// on, and no hand-over — the strongest unattended configuration.
+    var benchmarkMode: Bool {
+        didSet { UserDefaults.standard.set(benchmarkMode, forKey: Keys.benchmark) }
+    }
+
+    nonisolated static let stepRange = 5...50
+    nonisolated static let defaultMaxSteps = 25
+    nonisolated static let benchmarkMinSteps = 40
+
     let homepage = "https://duckduckgo.com"
 
     private enum Keys {
@@ -106,13 +117,16 @@ final class AppSettings {
         static let selfHeal = "settings.selfHealEnabled"
         static let dossier = "settings.dossierEnabled"
         static let handOver = "settings.handOverEnabled"
+        static let benchmark = "settings.benchmarkMode"
     }
 
     init() {
         let defaults = UserDefaults.standard
         defaultMode = AgentMode(rawValue: defaults.string(forKey: Keys.mode) ?? "") ?? .autopilot
         let storedSteps = defaults.integer(forKey: Keys.maxSteps)
-        maxSteps = storedSteps == 0 ? 12 : min(max(storedSteps, 5), 25)
+        maxSteps = storedSteps == 0
+            ? Self.defaultMaxSteps
+            : min(max(storedSteps, Self.stepRange.lowerBound), Self.stepRange.upperBound)
         model = ModelChoice(rawValue: defaults.string(forKey: Keys.model) ?? "") ?? .precise
         planning = PlanningPreference(rawValue: defaults.string(forKey: Keys.planning) ?? "") ?? .strong
         verifyBeforeDone = defaults.object(forKey: Keys.verify) as? Bool ?? true
@@ -127,5 +141,6 @@ final class AppSettings {
         selfHealEnabled = defaults.object(forKey: Keys.selfHeal) as? Bool ?? true
         dossierEnabled = defaults.object(forKey: Keys.dossier) as? Bool ?? true
         handOverEnabled = defaults.object(forKey: Keys.handOver) as? Bool ?? false
+        benchmarkMode = defaults.object(forKey: Keys.benchmark) as? Bool ?? false
     }
 }

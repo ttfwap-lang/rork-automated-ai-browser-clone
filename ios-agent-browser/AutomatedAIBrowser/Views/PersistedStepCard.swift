@@ -116,6 +116,17 @@ struct PersistedStepCard: View {
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(Theme.cyan.opacity(0.85))
                 }
+
+                if let timing = step.timingLine, !timing.isEmpty {
+                    HStack(spacing: 4) {
+                        Image(systemName: "stopwatch")
+                            .font(.system(size: 8, weight: .bold))
+                        Text(timing)
+                            .lineLimit(2)
+                    }
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundStyle(Theme.textSecondary)
+                }
             }
 
             if let file = step.thumbnailFile, let image = history.thumbnail(named: file) {

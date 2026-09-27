@@ -34,6 +34,9 @@ nonisolated struct ScannedElement: Identifiable, Codable, Equatable {
     var inputType: String? = nil
     /// True when this control was not on the page at the agent's last look.
     var isNew: Bool = false
+    /// "above" or "below" for a control outside the visible area; nil when it
+    /// is on screen. Element moves scroll it into view by themselves.
+    var offscreen: String? = nil
 
     /// Compact descriptor for feedback lines and step cards, e.g. `button "Add to cart"`.
     var shortDescriptor: String {
@@ -68,6 +71,9 @@ nonisolated struct ScannedElement: Identifiable, Codable, Equatable {
         }
         if let panelLabel, !panelLabel.isEmpty {
             line += " (in embedded panel: \(panelLabel))"
+        }
+        if let offscreen {
+            line += " (\(offscreen) \u{2014} scrolls itself)"
         }
         return line
     }

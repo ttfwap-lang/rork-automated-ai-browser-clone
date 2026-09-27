@@ -19,7 +19,7 @@ final class AgentViewModel {
 
     // Global Constants (Stage 1a.6)
     let stepDeadlineDuration: TimeInterval = 90.0
-    let runBudgetDuration: TimeInterval = 600.0 // 10 minutes
+    let runBudgetDuration: TimeInterval = 1_200.0 // 20 minutes
 
     private var runClockStart = Date()
     private var accumulatedPausedTime: TimeInterval = 0
@@ -337,9 +337,69 @@ final class AgentViewModel {
         }
     }
 
-    /// True when the free tier is switched on AND this iPhone can actually run it.
+    /// The current step's clock: laps for each phase.
+    private var stepTiming = StepTiming()
+    /// Every AI call's usage since the run began, for the run summary.
+    private var runCallMark = 0
+    /// Replies that could not be parsed and fell back to reading the page.
+    private var recoveryExtracts = 0
+
+    /// A task check started while the move runs, awaited before the ticks count.
+    private var pendingTaskCheck: Task<[Int], Never>?
+    /// When and where the last move finished settling, so the next step does
+    /// not wait for quiet all over again on a page that is already quiet.
+    private var lastSettle: (url: String, at: Date)?
+    /// A settled page this recent is not waited on again.
+    static let settleReuseWindow: TimeInterval = 2.0
+
+    /// True when the free tier is switched on AND this iPhone can actually run
+    /// it — and benchmark mode is off.
     private var isFreeTierReady: Bool {
-        settings.onDeviceFirst && onDevice.isReady
+        !settings.benchmarkMode && settings.onDeviceFirst && onDevice.isReady
+    }
+
+    // MARK: - Settings as this run applies them
+
+    /// Benchmark mode overrides a few settings for the run without changing
+    /// what you chose; everything reads these instead of the raw settings.
+    private var modelStrategy: ModelStrategy {
+        settings.benchmarkMode ? .alwaysPrecise : settings.modelStrategy
+    }
+
+    private var verifiesBeforeDone: Bool {
+        settings.benchmarkMode || settings.verifyBeforeDone
+    }
+
+    private var handOverAllowed: Bool {
+        !settings.benchmarkMode && settings.handOverEnabled
+    }
+
+    /// The step budget a typed goal gets.
+    private var stepBudget: Int {
+        settings.benchmarkMode ? max(settings.maxSteps, AppSettings.benchmarkMinSteps) : settings.maxSteps
+    }
+
+    /// Longest the free tier may take on a step before the cloud decides it.
+    /// It is only asked on small pages, where a quick answer is realistic.
+    static let freeDecisionTimeout: Duration = .seconds(2)
+    static let freeDecisionMaxElements = 25
+    /// The goal refiner is a nicety; it never holds up the run.
+    static let refineTimeout: Duration = .milliseconds(1_500)
+
+    /// Claude's thinking effort for one decision: short for simple steps, deep
+    /// for hard ones. In benchmark mode, never below medium.
+    nonisolated static func effort(for difficulty: StepDifficulty, benchmark: Bool) -> String {
+        switch difficulty {
+        case .routine: benchmark ? "medium" : "low"
+        case .normal: "medium"
+        case .hard: "high"
+        }
+    }
+
+    /// Temperature for models that take one (never sent to Claude): nearly
+    /// deterministic, loosened only when the agent is going round in circles.
+    nonisolated static func decisionTemperature(stagnantSteps: Int, isRepeating: Bool) -> Double {
+        stagnantSteps >= 2 || isRepeating ? AIService.stuckTemperature : AIService.decisionTemperature
     }
 
     var isRunning: Bool { runTask != nil }
@@ -450,14 +510,14 @@ final class AgentViewModel {
         sequenceResults = []
         activeGoal = goal
         currentStepIndex = 0
-        maxStepsThisRun = settings.maxSteps
+        maxStepsThisRun = stepBudget
         if let pending = pendingRoutine {
             pendingRoutine = nil
             activeRoutine = pending.routine
             routineValues = pending.values
             // A saved route can be longer than the budget a typed goal gets, and
             // cutting a replay off half way through is worse than useless.
-            maxStepsThisRun = max(settings.maxSteps, pending.routine.moves.count + 4)
+            maxStepsThisRun = max(stepBudget, pending.routine.moves.count + 4)
         }
         runStartDate = Date()
         runClockStart = Date()
@@ -469,7 +529,7 @@ final class AgentViewModel {
         Haptics.medium()
         AppLog.loop.info("Lifecycle: startRun initiated")
         // Warm the free model so its first answer is instant rather than sluggish.
-        if settings.onDeviceFirst {
+        if isFreeTierReady {
             onDevice.warmUp()
         }
         runTask = Task { [weak self] in
@@ -663,7 +723,9 @@ final class AgentViewModel {
     // MARK: - The loop
 
     private func runLoop(goal: String) async {
-        AppLog.loop.info("Run started: goal length=\(goal.count, privacy: .public), maxSteps=\(self.maxStepsThisRun, privacy: .public)")
+        AppLog.loop.info("Run started: goal length=\(goal.count, privacy: .public), maxSteps=\(self.maxStepsThisRun, privacy: .public), benchmark=\(self.settings.benchmarkMode, privacy: .public), gateway=\(GatewayProfile.current.summary, privacy: .public)")
+        runCallMark = CallMeter.shared.mark()
+        recoveryExtracts = 0
         var extracted: String?
 
         // Free, offline, and it makes the paid planning call sharper.
@@ -699,12 +761,16 @@ final class AgentViewModel {
             guard checkRunBudget(goal: goal) else { return }
 
             let stepStart = Date()
+            let stepCallMark = CallMeter.shared.mark()
+            stepTiming = StepTiming(start: stepStart)
             index += 1
             currentStepIndex = index
 
             defer {
-                if let step = steps.last(where: { $0.index == index }) {
-                    logStepProgress(step: step, duration: Date().timeIntervalSince(stepStart))
+                if let position = steps.lastIndex(where: { $0.index == index }) {
+                    let calls = CallTotals(CallMeter.shared.records(since: stepCallMark))
+                    steps[position].timingLine = stepTiming.line(calls: calls)
+                    logStepProgress(step: steps[position], duration: Date().timeIntervalSince(stepStart))
                 }
             }
 
@@ -728,7 +794,20 @@ final class AgentViewModel {
                 }
 
                 self.phase = .observing
-                await self.webProxy.waitForQuiet(maxWait: 8)
+                self.pendingTaskCheck?.cancel()
+                self.pendingTaskCheck = nil
+                let currentURL = self.webProxy.webView.url?.absoluteString ?? ""
+                if let settled = self.lastSettle,
+                   settled.url == currentURL,
+                   Date().timeIntervalSince(settled.at) < Self.settleReuseWindow,
+                   !self.webProxy.webView.isLoading {
+                    // The last move already waited for this page to go quiet.
+                    await self.webProxy.markBaseline()
+                } else {
+                    await self.webProxy.waitForQuiet(maxWait: 8)
+                }
+                self.lastSettle = nil
+                self.stepTiming.lap("settle")
                 guard !Task.isCancelled else {
                     self.finishRun(.stopped, "Stopped by you.", goal: goal)
                     return .loopReturn
@@ -739,6 +818,7 @@ final class AgentViewModel {
                 }
                 let observation = self.noticeChanges(in: await self.webProxy.observe())
                 guard !Task.isCancelled else { return .loopReturn }
+                self.stepTiming.lap("scan")
                 self.lastObservation = observation
                 if observation?.overlayLikely == true { self.overlaySeenThisRun = true }
 
@@ -757,6 +837,7 @@ final class AgentViewModel {
                 let snapshotImage: UIImage? = rawSnapshot.flatMap { raw in
                     observation.map { SnapshotAnnotator.annotate(raw, with: $0) } ?? raw
                 }
+                self.stepTiming.lap("shot")
 
                 let overview = self.pendingOverview
                 self.pendingOverview = nil
@@ -781,7 +862,7 @@ final class AgentViewModel {
                     stagnantSteps: self.stagnantSteps
                 ))
                 let routingInputs = ModelRouter.Inputs(
-                    strategy: self.settings.modelStrategy,
+                    strategy: self.modelStrategy,
                     preferred: self.settings.model,
                     read: read,
                     isFirstStep: index == 1,
@@ -804,7 +885,7 @@ final class AgentViewModel {
                 // A simple, fully listed page on the fast model needs no picture:
                 // the element list says everything, and the screenshot is most of
                 // the request. page_overview is the way back to sight.
-                let textOnly = self.settings.modelStrategy == .auto
+                let textOnly = self.modelStrategy == .auto
                     && read.difficulty == .routine
                     && overview == nil
                     && observation.map { !$0.elements.isEmpty && !$0.isPartial && $0.blockedPanelCount == 0 && $0.unlistedVisibleCount == 0 } == true
@@ -842,8 +923,13 @@ final class AgentViewModel {
                     request.answersNote = self.answersNote()
                     request.goalDetailsNote = GoalDetails.briefingLine(self.goalDetails)
                     request.canAskUser = self.questionsAsked < Self.maxQuestions
-                    request.canHandOver = self.settings.handOverEnabled && self.handOversUsed < Self.maxHandOvers
+                    request.canHandOver = self.handOverAllowed && self.handOversUsed < Self.maxHandOvers
                     request.textOnly = textOnly && choice == .fast
+                    request.effort = Self.effort(for: read.difficulty, benchmark: self.settings.benchmarkMode)
+                    request.temperature = Self.decisionTemperature(
+                        stagnantSteps: self.stagnantSteps,
+                        isRepeating: self.isRepeatingRecently()
+                    )
                     request.transcript = self.transcriptRejected ? [] : self.transcript()
                     return request
                 }
@@ -904,7 +990,7 @@ final class AgentViewModel {
                 if let escalation = ModelRouter.escalationForCommittingMove(
                     resolved.action,
                     decidedOn: route.choice,
-                    strategy: self.settings.modelStrategy,
+                    strategy: self.modelStrategy,
                     in: observation
                 ) {
                     AppLog.ai.info("Committing move from \(route.choice.modelID, privacy: .public) re-decided on the precise model")
@@ -928,6 +1014,10 @@ final class AgentViewModel {
                     }
                 }
 
+                self.stepTiming.lap("decide")
+                if resolved.action.kind == .extract, resolved.reasoning == AIService.recoveryReasoning {
+                    self.recoveryExtracts += 1
+                }
                 var resolvedAction = resolved.action
                 let reasoningText = resolved.reasoning
                 let weighed = resolved.weighed
@@ -958,14 +1048,19 @@ final class AgentViewModel {
                    let previous = self.steps.last(where: { $0.action.kind.isPageAction && $0.status == .executed }) {
                     self.failedSignatures.insert(previous.action.repetitionSignature)
                 }
-                // Ticks are checked before they count.
-                if resolvedAction.kind != .done, let claimed = resolvedAction.completedTasks, !claimed.isEmpty {
-                    resolvedAction.completedTasks = await self.checkedTaskClaims(
-                        claimed,
-                        goal: goal,
-                        snapshot: rawSnapshot
-                    )
+                // Ticks are checked before they count. The check reads this
+                // page now, before the move changes it, then runs while the
+                // move plays; its verdict is applied before the ticks count.
+                if resolvedAction.kind != .done,
+                   let claimed = resolvedAction.completedTasks,
+                   self.taskClaimsNeedChecking(claimed) {
+                    let reading = await self.webProxy.readWholePage()
                     guard !Task.isCancelled else { return .loopReturn }
+                    let snapshotForCheck = rawSnapshot
+                    self.pendingTaskCheck = Task { [weak self] in
+                        guard let self else { return claimed }
+                        return await self.checkedTaskClaims(claimed, goal: goal, snapshot: snapshotForCheck, reading: reading)
+                    }
                 }
                 // Checked against the page the move was decided on, before the
                 // move can change it.
@@ -1014,14 +1109,14 @@ final class AgentViewModel {
                     if Self.isHardWall(reason), index < self.maxStepsThisRun {
                         // Hand-over on: the person does that part. Off: the agent
                         // is sent back to keep working the page's own route.
-                        if self.settings.handOverEnabled, self.handOversUsed < Self.maxHandOvers {
+                        if self.handOverAllowed, self.handOversUsed < Self.maxHandOvers {
                             var handOver = AgentAction(type: AgentActionKind.handOver.rawValue)
                             handOver.instruction = "The agent is stuck here: \(String(reason.prefix(140))). Do this part yourself, then tap Done."
                             handOver.reason = reason
                             self.steps[self.steps.count - 1].action = handOver
                             return .ready(action: handOver, snapshot: rawSnapshot, observation: observation, fingerprint: nil, extracted: currentExtracted)
                         }
-                        if !self.settings.handOverEnabled, self.wallPushbacks < Self.maxWallPushbacks {
+                        if !self.handOverAllowed, self.wallPushbacks < Self.maxWallPushbacks {
                             self.wallPushbacks += 1
                             self.steps[self.steps.count - 1].status = .executed
                             self.steps[self.steps.count - 1].result = "not giving up at this wall — hand-over is off, so the agent keeps working the page's own route"
@@ -1156,7 +1251,7 @@ final class AgentViewModel {
                           stepIndex == self.steps.count - 1
                     else { return false }
                     if resolvedAction.kind == .revisePlan {
-                        self.applyRevision(resolvedAction)
+                        self.applyRevision(await self.withCheckedTicks(resolvedAction, stepID: actionStepID))
                         return true
                     }
 
@@ -1170,7 +1265,12 @@ final class AgentViewModel {
                     }
                     guard !Task.isCancelled else { return false }
 
+                    self.stepTiming.lap("prep")
                     let execution = await self.execute(resolvedAction)
+                    self.stepTiming.lap("act")
+                    if !Self.leavesThePage(resolvedAction) {
+                        self.lastSettle = (self.webProxy.webView.url?.absoluteString ?? "", Date())
+                    }
                     guard !Task.isCancelled,
                           let currentStepIndex = self.steps.firstIndex(where: { $0.id == actionStepID }),
                           currentStepIndex == self.steps.count - 1
@@ -1206,9 +1306,11 @@ final class AgentViewModel {
                         } else {
                             self.recordExecutedMove(resolvedAction, fingerprint: fingerprint, result: resultText)
                         }
-                        self.applyChecklist(from: resolvedAction)
+                        self.applyChecklist(from: await self.withCheckedTicks(resolvedAction, stepID: actionStepID))
                         self.noteOutcome(action: resolvedAction, result: resultText)
                     } else {
+                        self.pendingTaskCheck?.cancel()
+                        self.pendingTaskCheck = nil
                         // A remote error is useful evidence for the next model
                         // turn, but it is not a completed local move and must
                         // never advance a mission or enter replay memory.
@@ -1395,7 +1497,7 @@ final class AgentViewModel {
         steps[last].status = .terminal
         applyChecklist(from: action)
 
-        guard settings.verifyBeforeDone else {
+        guard verifiesBeforeDone else {
             finishRun(.completed, claimed, goal: goal)
             return .finished
         }
@@ -1598,6 +1700,12 @@ final class AgentViewModel {
         guard let observation else {
             return .handedOver("the page scan was unavailable")
         }
+        // Small pages only: the small model is quick there, and its context
+        // window cannot hold a long whole-page list.
+        guard observation.visibleElements.count <= Self.freeDecisionMaxElements,
+              observation.elements.count <= Self.freeDecisionMaxElements * 2 else {
+            return .handedOver("too busy a page for your iPhone's model")
+        }
         let answer = await onDevice.ask(
             instructions: OnDeviceDecider.instructions,
             prompt: OnDeviceDecider.prompt(
@@ -1605,7 +1713,8 @@ final class AgentViewModel {
                 currentTask: plan?.currentTask?.title,
                 pageMap: observation.mapText,
                 lastResult: lastResultLine
-            )
+            ),
+            timeout: Self.freeDecisionTimeout
         )
         guard let raw = answer.text else {
             return .handedOver(answer.handoffNote ?? "your iPhone's model couldn't answer")
@@ -1628,7 +1737,8 @@ final class AgentViewModel {
         guard isFreeTierReady else { return }
         let answer = await onDevice.ask(
             instructions: GoalRefiner.instructions,
-            prompt: GoalRefiner.prompt(goal: goal)
+            prompt: GoalRefiner.prompt(goal: goal),
+            timeout: Self.refineTimeout
         )
         guard let raw = answer.text,
               let parsed = GoalRefiner.parse(raw, original: goal)
@@ -2040,7 +2150,7 @@ final class AgentViewModel {
     /// its own — otherwise turning the check off would quietly switch saving off
     /// with it, which is not a trade-off anyone asked for.
     private var wasLastRunTrustworthy: Bool {
-        settings.verifyBeforeDone ? finalVerdict == .confirmed : lastFinishedOutcome == .completed
+        verifiesBeforeDone ? finalVerdict == .confirmed : lastFinishedOutcome == .completed
     }
 
     /// A name to offer for the replay, derived from the goal rather than invented.
@@ -3397,8 +3507,14 @@ final class AgentViewModel {
         guard !didFinishRun else { return }
         didFinishRun = true
         AppLog.loop.info("Lifecycle finishRun: outcome=\(outcome.rawValue, privacy: .public)")
+        let runCalls = CallTotals(CallMeter.shared.records(since: runCallMark))
+        let decidedSteps = steps.filter { $0.modelChoice != nil }.count
+        AppLog.loop.info("Run summary: outcome=\(outcome.rawValue, privacy: .public), steps=\(decidedSteps, privacy: .public), elapsed=\(String(format: "%.1fs", self.agentElapsedTime), privacy: .public), ai=\(runCalls.line, privacy: .public), aiSeconds=\(String(format: "%.1f", runCalls.seconds), privacy: .public), recoveryExtracts=\(self.recoveryExtracts, privacy: .public)")
         phase = .idle
         onDevice.coolDown()
+        pendingTaskCheck?.cancel()
+        pendingTaskCheck = nil
+        lastSettle = nil
         resumeApproval(false)
         resumeQuestion(nil)
         resumeHandOver(false)
@@ -3553,7 +3669,8 @@ final class AgentViewModel {
                 weighedCount: step.candidates.isEmpty ? nil : step.candidates.count,
                 wasReplayed: step.isReplayed ? true : nil,
                 wasHealed: step.wasHealed ? true : nil,
-                dossierNote: step.dossierNote
+                dossierNote: step.dossierNote,
+                timingLine: step.timingLine
             )
         }
         history.add(AgentRun(
@@ -3769,11 +3886,10 @@ final class AgentViewModel {
     /// agent's own tick is accepted rather than spending more. If the check
     /// cannot run at all, the tick stands — a network error must not freeze the
     /// checklist.
-    private func checkedTaskClaims(_ claimed: [Int], goal: String, snapshot: UIImage?) async -> [Int] {
-        guard settings.verifyBeforeDone, let plan else { return claimed }
+    private func checkedTaskClaims(_ claimed: [Int], goal: String, snapshot: UIImage?, reading: String) async -> [Int] {
+        guard verifiesBeforeDone, let plan else { return claimed }
         var accepted: [Int] = []
         var objections: [String] = []
-        var reading: String?
 
         for number in claimed {
             guard let task = plan.task(numbered: number) else { continue }
@@ -3782,8 +3898,7 @@ final class AgentViewModel {
                 continue
             }
             taskChecks[number, default: 0] += 1
-            if reading == nil { reading = await webProxy.readWholePage() }
-            let focused = PageDigest.digest(reading ?? "", query: "\(task.title) \(task.doneWhen)", budget: 4_000)
+            let focused = PageDigest.digest(reading, query: "\(task.title) \(task.doneWhen)", budget: 4_000)
             countCall(on: .fast)
             do {
                 let result = try await ai.checkTask(AIService.TaskCheckRequest(
@@ -3811,6 +3926,38 @@ final class AgentViewModel {
             pendingTaskNote = "NOT TICKED — the check could not see these tasks finished: \(objections.joined(separator: "; ")). Finish them, or show the evidence, before ticking them again."
         }
         return accepted
+    }
+
+    /// True when at least one claimed tick would actually be sent to the check.
+    private func taskClaimsNeedChecking(_ claimed: [Int]) -> Bool {
+        guard !claimed.isEmpty, verifiesBeforeDone, let plan else { return false }
+        return claimed.contains { number in
+            guard let task = plan.task(numbered: number) else { return false }
+            return task.state != .done && taskChecks[number, default: 0] < Self.maxTaskChecks
+        }
+    }
+
+    /// The action with only the ticks the background check accepted, once it
+    /// has finished. The step card is updated to match.
+    private func withCheckedTicks(_ action: AgentAction, stepID: UUID?) async -> AgentAction {
+        guard let check = pendingTaskCheck else { return action }
+        pendingTaskCheck = nil
+        let accepted = await check.value
+        var checked = action
+        checked.completedTasks = accepted
+        if let stepID, let index = steps.firstIndex(where: { $0.id == stepID }) {
+            steps[index].action.completedTasks = accepted
+        }
+        return checked
+    }
+
+    /// Moves after which the page is a different page: the next step waits for
+    /// it to load and go quiet, whatever the last settle said.
+    nonisolated static func leavesThePage(_ action: AgentAction) -> Bool {
+        switch action.kind {
+        case .navigate, .back, .sequence: true
+        default: false
+        }
     }
 
     // MARK: - Several moves in one turn
@@ -3849,7 +3996,7 @@ final class AgentViewModel {
     private func handOverToPerson(_ action: AgentAction) async -> Bool {
         let last = steps.count - 1
         guard last >= 0 else { return true }
-        guard settings.handOverEnabled, handOversUsed < Self.maxHandOvers else {
+        guard handOverAllowed, handOversUsed < Self.maxHandOvers else {
             steps[last].status = .failed
             steps[last].result = "hand-over is not available now — keep working the page's own route"
             return true
