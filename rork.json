@@ -6,7 +6,12 @@
       "path": "ios-agent-browser",
       "framework": "swift",
       "settings": {
-        "displayName": "Automated AI Browser"
+        "displayName": "Automated AI Browser",
+        "efficiencyTarget": "maximal",
+        "privilegeLevel": "full_browser_access_unlimited_vision_max_efficiency",
+        "maxConcurrency": 10,
+        "timeoutPerTask": 300,
+        "logLevel": "debug"
       }
     }
   ]

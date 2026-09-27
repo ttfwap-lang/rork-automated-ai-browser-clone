@@ -132,6 +132,22 @@ private class AsyncTaskQueue<T: Sendable> {
             }
         }
     }
+    
+    func stop() {
+        // Signal to stop processing tasks
+        queue.removeAll()
+    }
+}
+
+// MARK: - Simulated Work
+private func simulateWork() -> Task<Void, Error> {
+    // Simulate work by performing a brief async operation
+    return Task { [weak self] in
+        // In a real implementation, this would perform actual work
+        // For now, we simulate a short delay to represent work
+        try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
+        return None
+    }
 }
 
 // MARK: - Actions
