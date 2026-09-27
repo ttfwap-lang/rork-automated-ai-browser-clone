@@ -4,7 +4,7 @@ import SwiftUI
 struct OutcomeBannerView: View {
     @Environment(AgentViewModel.self) private var agent
     let banner: OutcomeBanner
-    @State private var isSaving = false
+    @State private var scriptDraft: Routine?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -23,8 +23,8 @@ struct OutcomeBannerView: View {
         )
         .padding(.horizontal, 16)
         .padding(.top, 8)
-        .sheet(isPresented: $isSaving) {
-            SaveRoutineSheet()
+        .sheet(item: $scriptDraft) { draft in
+            ScriptEditorView(routine: draft, isNew: true)
         }
     }
 
@@ -66,12 +66,12 @@ struct OutcomeBannerView: View {
     private var saveButton: some View {
         Button {
             Haptics.light()
-            isSaving = true
+            scriptDraft = agent.draftScript()
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: "bolt.badge.clock.fill")
                     .font(.system(size: 10, weight: .bold))
-                Text("SAVE AS ONE-TAP REPLAY")
+                Text("SAVE AS SCRIPT")
                     .techLabel(9)
             }
             .foregroundStyle(Theme.cyan)

@@ -74,6 +74,16 @@ final class RoutineStore {
         save()
     }
 
+    /// Replaces a routine with its edited version, keeping its run record.
+    func update(_ routine: Routine) {
+        guard let index = routines.firstIndex(where: { $0.id == routine.id }) else {
+            add(routine)
+            return
+        }
+        routines[index] = routine
+        save()
+    }
+
     func delete(_ id: UUID) {
         routines.removeAll { $0.id == id }
         save()

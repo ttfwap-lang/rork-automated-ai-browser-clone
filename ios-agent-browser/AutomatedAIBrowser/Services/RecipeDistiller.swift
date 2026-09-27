@@ -58,10 +58,17 @@ nonisolated enum RecipeDistiller {
     /// Kept as its own step so anything that needs to line up with the route —
     /// a routine's blanks, for one — uses exactly the same rule rather than a
     /// second copy of it that can drift.
+    /// Moves that only look at the page.
+    static let lookOnlyKinds: Set<AgentActionKind> = [.extract, .pageOverview, .listOptions, .findText]
+
     static func keptIndices(from moves: [Move]) -> [Int] {
         moves
             .enumerated()
             .filter { $0.element.kind.isPageAction }
+            // Looking is not a step of the route: a reading, a listing or a
+            // search of the page changes nothing a replay would need to redo,
+            // and keeping them would cut a saved script short at the first one.
+            .filter { !lookOnlyKinds.contains($0.element.kind) }
             .filter { !ReactionWatch.readsAsFailure($0.element.result ?? "") }
             .prefix(maxMoves)
             .map { $0.offset }

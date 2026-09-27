@@ -61,13 +61,45 @@ nonisolated enum RoutineBuilder {
             // A form fill needs several values at once, so a single blank would
             // misrepresent it. Those steps stop and ask you on the page instead.
             guard move.kind == .typeInto || move.kind == .selectOption else { continue }
-            guard let kind = move.valueKind?.trimmed, !kind.isEmpty else { continue }
+            // A step with its own value (typed in the editor, or from your
+            // identity details) has nothing to ask.
+            switch move.valueSource {
+            case .fixed?, .identity?: continue
+            case .askAtLaunch?, nil: break
+            }
+            let fallback = "value for step \(index + 1)"
+            let kind = (move.valueKind?.trimmed).flatMap { $0.isEmpty ? nil : $0 } ?? fallback
             let seen = (used[kind.lowercased()] ?? 0) + 1
             used[kind.lowercased()] = seen
             let label = seen == 1 ? kind : "\(kind) (\(seen))"
             blanks.append(RoutineBlank(label: label, moveIndex: index))
         }
         return blanks
+    }
+
+    /// A script after editing: blanks recomputed from the steps as they now
+    /// stand, and the goal sentence brought into line — placeholders for blanks
+    /// that no longer exist are removed, new ones are appended.
+    static func rebuilt(_ routine: Routine) -> Routine {
+        var edited = routine
+        edited.moves = Array(routine.moves.prefix(maxMoves))
+        let oldBlanks = routine.blanks
+        let newBlanks = blanks(for: edited.moves)
+        var text = routine.goalTemplate
+        for blank in oldBlanks where !newBlanks.contains(where: { $0.token == blank.token }) {
+            text = text.replacingOccurrences(of: blank.token, with: "")
+        }
+        var appended: [String] = []
+        for blank in newBlanks where !text.contains(blank.token) {
+            appended.append("\(blank.label): \(blank.token)")
+        }
+        text = text.replacingOccurrences(of: "  ", with: " ").trimmed
+        if !appended.isEmpty {
+            text += (text.isEmpty ? "" : " — ") + appended.joined(separator: ", ")
+        }
+        edited.goalTemplate = text
+        edited.blanks = newBlanks
+        return edited
     }
 
     /// The goal sentence with every typed value swapped for its blank.

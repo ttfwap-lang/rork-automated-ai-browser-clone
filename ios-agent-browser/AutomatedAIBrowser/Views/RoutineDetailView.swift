@@ -12,6 +12,7 @@ struct RoutineDetailView: View {
     @State private var isRenaming = false
     @State private var confirmDelete = false
     @State private var isLaunching = false
+    @State private var isEditing = false
 
     /// Read back from the store so repairs and renames show immediately.
     private var live: Routine {
@@ -41,6 +42,13 @@ struct RoutineDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
+                Button("Edit") {
+                    isEditing = true
+                }
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(Theme.cyan)
+            }
+            ToolbarItem(placement: .topBarTrailing) {
                 Button("Rename") {
                     draftTitle = live.title
                     isRenaming = true
@@ -69,6 +77,9 @@ struct RoutineDetailView: View {
         }
         .sheet(isPresented: $isLaunching) {
             RoutineLaunchSheet(routine: live)
+        }
+        .sheet(isPresented: $isEditing) {
+            ScriptEditorView(routine: live, isNew: false)
         }
     }
 

@@ -362,6 +362,7 @@ final class AgentViewModel {
     func startRun() {
         let goal = goalText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !goal.isEmpty, runTask == nil else { return }
+        offerScriptSave = false
         steps = []
         outcomeBanner = nil
         lastObservation = nil
@@ -2000,6 +2001,38 @@ final class AgentViewModel {
         return !routines.contains(host: host, moves: route)
     }
 
+    /// Set when a run ends in success and can be saved; the app then asks
+    /// "Save last run as a script?".
+    var offerScriptSave = false
+
+    /// The run that just finished, as a script ready for editing. Nothing is
+    /// saved until the editor saves it.
+    func draftScript() -> Routine? {
+        guard let goal = lastFinishedGoal else { return nil }
+        let host = RecipeMatcher.normalizedHost(webProxy.webView.url?.absoluteString ?? "")
+        let kept = RecipeDistiller.keptIndices(from: executedMoves)
+        let route = RecipeDistiller.route(from: executedMoves)
+        var values: [Int: String] = [:]
+        for (routeIndex, executedIndex) in kept.enumerated() {
+            if let value = typedValues[executedIndex] {
+                values[routeIndex] = value
+            }
+        }
+        return RoutineBuilder.make(
+            goal: goal,
+            host: host,
+            title: suggestedRoutineTitle,
+            moves: route,
+            typedValues: values
+        )
+    }
+
+    /// Saves a script from the editor — a new one, or an edit of a saved one.
+    func saveScript(_ routine: Routine) {
+        routines.update(RoutineBuilder.rebuilt(routine))
+        Haptics.success()
+    }
+
     /// Whether the last run earned the right to become a saved replay.
     ///
     /// Normally the independent check has to have confirmed it. With the check
@@ -2014,33 +2047,6 @@ final class AgentViewModel {
     var suggestedRoutineTitle: String {
         let host = RecipeMatcher.normalizedHost(webProxy.webView.url?.absoluteString ?? "")
         return RecipeDistiller.fallbackLabel(goal: lastFinishedGoal ?? "", host: host).title
-    }
-
-    /// Saves the run that just finished as a one-tap replay.
-    ///
-    /// The route comes from the same mechanical derivation a memory uses, so it is
-    /// value-free. What was typed is used only to find those values in the goal
-    /// sentence and replace them with blanks to be asked for next time.
-    func saveRoutine(title: String) {
-        guard let goal = lastFinishedGoal else { return }
-        let host = RecipeMatcher.normalizedHost(webProxy.webView.url?.absoluteString ?? "")
-        let kept = RecipeDistiller.keptIndices(from: executedMoves)
-        let route = RecipeDistiller.route(from: executedMoves)
-        var values: [Int: String] = [:]
-        for (routeIndex, executedIndex) in kept.enumerated() {
-            if let value = typedValues[executedIndex] {
-                values[routeIndex] = value
-            }
-        }
-        guard let routine = RoutineBuilder.make(
-            goal: goal,
-            host: host,
-            title: title,
-            moves: route,
-            typedValues: values
-        ) else { return }
-        routines.add(routine)
-        Haptics.success()
     }
 
     /// Replays a saved route, repairing any step the site has moved.
@@ -2264,13 +2270,28 @@ final class AgentViewModel {
             return .stop("the saved step has no target to look for")
         }
 
-        // Typing and choosing need the blank you filled in at launch.
+        // Typing and choosing take their value from where the script says:
+        // the blank you filled in at launch, a value written into the script,
+        // or one of your identity details.
         var filled: String?
         if move.kind == .typeInto || move.kind == .selectOption {
-            guard let value = routine.value(forMoveAt: index, from: routineValues) else {
-                return .stop("nothing was filled in for “\(move.valueKind ?? "this step")”")
+            switch move.valueSource {
+            case .fixed(let text)?:
+                guard !text.trimmed.isEmpty else {
+                    return .stop("step \(index + 1) is set to type a fixed value, but the value is empty")
+                }
+                filled = text
+            case .identity(let detail)?:
+                guard let value = dossier.value(for: detail) else {
+                    return .stop("step \(index + 1) fills “\(detail.label)” from your identity details, and none is saved")
+                }
+                filled = value
+            case .askAtLaunch?, nil:
+                guard let value = routine.value(forMoveAt: index, from: routineValues) else {
+                    return .stop("nothing was filled in for “\(move.valueKind ?? "this step")”")
+                }
+                filled = value
             }
-            filled = value
         }
 
         var elementID: Int?
@@ -3396,6 +3417,8 @@ final class AgentViewModel {
         outcomeBanner = OutcomeBanner(outcome: outcome, message: message)
         activeGoal = nil
         runTask = nil
+        // Asked after every run that ended in a success worth keeping.
+        offerScriptSave = outcome == .completed && canSaveRoutine
         switch outcome {
         case .completed: Haptics.success()
         case .unconfirmed: Haptics.warning()
@@ -3710,14 +3733,14 @@ final class AgentViewModel {
 
         // Stagnation: the page is byte-for-byte what it was, after a move that
         // was meant to change something.
-        let print = observation.fingerprint(urlString: url)
+        let pageNow = observation.fingerprint(urlString: url)
         let looksOnly: Set<AgentActionKind> = [.extract, .pageOverview, .listOptions, .wait, .askUser, .handOver, .findText]
-        if print == lastFingerprint, let lastMove, !looksOnly.contains(lastMove) {
+        if pageNow == lastFingerprint, let lastMove, !looksOnly.contains(lastMove) {
             stagnantSteps += 1
         } else {
             stagnantSteps = 0
         }
-        lastFingerprint = print
+        lastFingerprint = pageNow
         return marked
     }
 

@@ -8,6 +8,8 @@ struct ContentView: View {
     @State private var showSettings = false
     @State private var showMemory = false
     @State private var showDossier = false
+    /// The run that just finished, as a script open in the editor.
+    @State private var scriptDraft: Routine?
 
     var body: some View {
         @Bindable var agent = agent
@@ -40,6 +42,17 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showDossier) {
             DossierView()
+        }
+        .sheet(item: $scriptDraft) { draft in
+            ScriptEditorView(routine: draft, isNew: true)
+        }
+        .alert("Save last run as a script?", isPresented: $agent.offerScriptSave) {
+            Button("Edit & Save") {
+                scriptDraft = agent.draftScript()
+            }
+            Button("Not Now", role: .cancel) {}
+        } message: {
+            Text("Keep the steps that just worked as a script you can reorder, edit, and run again with one tap — with any step able to fill from your identity details.")
         }
         .onAppear {
             agent.loadHomepageIfNeeded()

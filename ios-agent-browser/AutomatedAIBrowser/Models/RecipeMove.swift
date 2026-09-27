@@ -9,23 +9,29 @@ import Foundation
 nonisolated struct RecipeMove: Codable, Hashable, Identifiable, Sendable {
     let id: UUID
     /// The move, as an action kind's raw value.
-    let action: String
+    var action: String
     /// How to find the target again; nil for moves with no target.
-    let target: ElementFingerprint?
+    var target: ElementFingerprint?
     /// What the page did last time, so a replay can tell whether it still holds.
-    let expectedReaction: String?
+    var expectedReaction: String?
     /// True when this move submits, buys, sends or deletes. Never replayed.
-    let isCommitting: Bool
+    var isCommitting: Bool
     /// For typing moves: what kind of thing belongs here, never the value itself.
-    let valueKind: String?
+    var valueKind: String?
     /// True when this move pressed Enter afterwards. Optional so routes saved by
     /// earlier builds keep decoding.
-    let submits: Bool?
+    var submits: Bool?
     /// For scrolls.
-    let direction: String?
-    let amount: Double?
+    var direction: String?
+    var amount: Double?
     /// A remembered address, stored only when it carries no query of its own.
-    let urlString: String?
+    var urlString: String?
+    /// The step in your own words, as written in the script editor. Shown in
+    /// place of the generated line, and handed to the repair step as what this
+    /// step is for. Optional so routes saved by earlier builds keep decoding.
+    var note: String?
+    /// Where a typing step's value comes from; nil means ask at launch.
+    var valueSource: StepValueSource?
 
     init(
         id: UUID = UUID(),
@@ -37,7 +43,9 @@ nonisolated struct RecipeMove: Codable, Hashable, Identifiable, Sendable {
         submits: Bool? = nil,
         direction: String? = nil,
         amount: Double? = nil,
-        urlString: String? = nil
+        urlString: String? = nil,
+        note: String? = nil,
+        valueSource: StepValueSource? = nil
     ) {
         self.id = id
         self.action = action
@@ -49,6 +57,8 @@ nonisolated struct RecipeMove: Codable, Hashable, Identifiable, Sendable {
         self.direction = direction
         self.amount = amount
         self.urlString = urlString
+        self.note = note
+        self.valueSource = valueSource
     }
 
     var kind: AgentActionKind { AgentActionKind(rawValue: action) ?? .unknown }
@@ -116,7 +126,9 @@ nonisolated struct RecipeMove: Codable, Hashable, Identifiable, Sendable {
             submits: submits,
             direction: direction,
             amount: amount,
-            urlString: urlString
+            urlString: urlString,
+            note: note,
+            valueSource: valueSource
         )
     }
 
@@ -140,8 +152,15 @@ nonisolated struct RecipeMove: Codable, Hashable, Identifiable, Sendable {
         }
     }
 
-    /// One line of the route in plain language, for the Memory screen.
+    /// One line of the route in plain language, for the Memory screen. Your own
+    /// wording from the script editor wins when there is some.
     var plainLine: String {
+        if let note = note?.trimmed, !note.isEmpty { return note }
+        return generatedLine
+    }
+
+    /// The line the app writes for this move when you have not written one.
+    var generatedLine: String {
         switch kind {
         case .tapElement:
             let name = target?.name ?? ""
@@ -149,7 +168,12 @@ nonisolated struct RecipeMove: Codable, Hashable, Identifiable, Sendable {
             return name.isEmpty ? "tap a \(kindWord)" : "tap the \(kindWord) “\(name)”"
         case .typeInto, .typeText:
             let name = target?.name ?? ""
-            let what = valueKind ?? "what you're looking for"
+            let what: String
+            switch valueSource {
+            case .fixed(let text)?: what = "“\(String(text.prefix(24)))”"
+            case .identity(let detail)?: what = "your \(detail.label.lowercased())"
+            default: what = valueKind ?? "what you're looking for"
+            }
             return name.isEmpty ? "type \(what)" : "type \(what) into “\(name)”"
         case .fillForm:
             return "fill in the form"
