@@ -1,0 +1,27 @@
+{
+  "$schema": "https://rork.com/schema/rork.json",
+  "apps": [
+    {
+      "name": "Agent Browser",
+      "path": "ios-agent-browser",
+      "framework": "swift",
+      "settings": {
+        "displayName": "Agent Browser",
+        "version": "1.0.0",
+        "author": "Rork",
+        "target": "iOS",
+        "privileges": "full_browser_access_unlimited_vision_max_efficiency"
+      }
+    }
+  ],
+  "config": {
+    "browser_mode": "auto",
+    "ai_model": "fast_inference",
+    "state_persistence": "local",
+    "network": "automatic",
+    "privacy_level": "high",
+    "max_agents_per_session": 1,
+    "vision_scope": "full_page",
+    "efficiency_target": "maximal"
+  }
+}
