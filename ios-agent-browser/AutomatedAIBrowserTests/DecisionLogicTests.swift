@@ -310,7 +310,7 @@ struct DecisionLogicTests {
         #expect(json.contains(#""reasoning":"search for it""#))
         #expect(json.contains(#""submit":true"#))
         // Only tools that are on offer every turn are replayed.
-        #expect(AIService.transcriptArguments(for: AgentAction(type: "run_plugin"), reasoning: "") == nil)
+        #expect(AIService.transcriptArguments(for: AgentAction(type: "revise_plan"), reasoning: "") == nil)
         #expect(AIService.transcriptArguments(for: AgentAction(type: "rewind"), reasoning: "") == nil)
         #expect(AIService.transcriptArguments(for: AgentAction(type: "ask_user"), reasoning: "") == nil)
     }
