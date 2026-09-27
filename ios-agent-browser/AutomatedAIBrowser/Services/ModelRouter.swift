@@ -59,9 +59,10 @@ nonisolated enum ModelRouter {
         if inputs.read.isFlyingBlind {
             return Route(choice: .precise, reason: "no page scan — flying on vision alone", isForced: true)
         }
-        if inputs.read.isIrreversible {
-            return Route(choice: .precise, reason: "an irreversible move is on screen", isForced: true)
-        }
+        // An irreversible control merely being on screen is not a reason to pay
+        // for the frontier model — most shop and form pages have one. The loop
+        // checks the move actually chosen and re-decides it on the precise model
+        // when that move commits (`escalationForCommittingMove`).
         if inputs.mustEscalate {
             return Route(choice: .precise, reason: "escalated after the last step failed", isForced: true)
         }
@@ -77,6 +78,38 @@ nonisolated enum ModelRouter {
         case .normal:
             return Route(choice: inputs.preferred, reason: "normal step — your preference", isForced: false)
         }
+    }
+
+    /// When a cheaper model chose a move that commits — buys, sends, deletes,
+    /// submits — that one decision is taken again on the precise model. The
+    /// route to re-decide on, or nil when the move is fine as it stands.
+    static func escalationForCommittingMove(
+        _ action: AgentAction,
+        decidedOn choice: ModelChoice,
+        strategy: ModelStrategy,
+        in observation: PageObservation?
+    ) -> Route? {
+        guard strategy == .auto, choice != .precise else { return nil }
+        guard isCommitting(action, in: observation) else { return nil }
+        return Route(choice: .precise, reason: "the chosen move commits — double-checked on the precise model", isForced: true)
+    }
+
+    /// True for a move that cannot be taken back: pressing a control whose
+    /// name reads as a commitment, or any submit/Enter outside a search box.
+    static func isCommitting(_ action: AgentAction, in observation: PageObservation?) -> Bool {
+        var names: [String] = []
+        if let name = action.elementName { names.append(name) }
+        for id in [action.element, action.from, action.to].compactMap({ $0 }) {
+            if let element = observation?.element(withID: id) { names.append(element.name) }
+        }
+        if let option = action.option { names.append(option) }
+        if names.contains(where: OnDeviceGate.isIrreversible) { return true }
+        if action.kind == .fillForm, action.submit == true { return true }
+        if action.submit == true {
+            let field = action.element.flatMap { observation?.element(withID: $0) }
+            return !RecipeDistiller.isSearchLike(field?.name)
+        }
+        return false
     }
 
     /// Where the step goes when the free tier is not used, or when its answer is

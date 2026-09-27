@@ -143,7 +143,7 @@ nonisolated enum GestureScripts {
           \#(fireFunction)
           try {
             var el = __find(\#(id), \#(PageScanner.jsStringLiteral(expectedName)), false);
-            if (!el) { return 'element \#(display) is no longer on the page — the page changed; look again before acting'; }
+            if (!el) { return \#(PageScanner.missExpression(display: display)); }
             try { el.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' }); } catch (e) {}
             var r = el.getBoundingClientRect();
             var x = Math.max(1, Math.min(window.innerWidth - 1, r.left + r.width / 2));
@@ -188,7 +188,7 @@ nonisolated enum GestureScripts {
           \#(PageScanner.findFunction)
           try {
             var el = __find(\#(id), \#(PageScanner.jsStringLiteral(expectedName)), false);
-            if (!el) { return 'element \#(display) is no longer on the page — the page changed; look again before acting'; }
+            if (!el) { return \#(PageScanner.missExpression(display: display)); }
             try { el.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' }); } catch (e) {}
             var r = el.getBoundingClientRect();
             var x = Math.max(1, Math.min(window.innerWidth - 1, r.left + r.width / 2));

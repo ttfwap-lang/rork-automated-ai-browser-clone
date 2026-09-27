@@ -125,15 +125,25 @@ nonisolated enum OnDeviceGate {
 
     /// Anything that buys, sends, deletes or confirms stays with the frontier
     /// model, exactly as the routing rules already decided.
+    ///
+    /// Matched on whole words (with common endings), so "Payment" counts and
+    /// "PayPal" or "Sender" do not.
     static func isIrreversible(_ name: String) -> Bool {
-        let lower = name.lowercased()
-        return DifficultyScout.irreversibleWords.contains { lower.contains($0) }
+        Wording.containsAny(name, DifficultyScout.irreversibleWords, allowInflection: true)
     }
 
+    /// Longer than this, a label is a sentence or a card, not a dismissal button.
+    private static let maxDismissalWords = 5
+
     /// True when a button reads like a cookie wall or dialog dismissal.
+    ///
+    /// Whole words only — "ok" must never be found inside "Book" or "Facebook" —
+    /// and anything that also reads as a commitment ("Continue to payment") is
+    /// never a dismissal.
     static func isDismissal(_ name: String) -> Bool {
-        let lower = name.trimmed.lowercased()
-        guard !lower.isEmpty else { return false }
-        return dismissalWords.contains { lower == $0 || lower.hasPrefix($0 + " ") || lower.contains($0) }
+        let count = Wording.words(name).count
+        guard count > 0, count <= maxDismissalWords else { return false }
+        guard !isIrreversible(name) else { return false }
+        return Wording.containsAny(name, dismissalWords)
     }
 }

@@ -22,6 +22,16 @@ nonisolated struct AgentAction: Codable, Equatable {
     /// Resolved descriptor of the targeted element, e.g. `button "Add to cart"`.
     /// Filled in by the app from the page observation — not by the model.
     var elementName: String?
+    /// App-resolved identity of the targeted element that survives a rescan
+    /// (`ScannedElement.targetKey`). Used in place of the badge number when
+    /// remembering which moves failed or were barred. Never set by the model.
+    var targetKey: String?
+    /// Facts the agent noted from the page alongside this move.
+    var notedFacts: [NotedFact]?
+    /// The question put to the person (ask_user).
+    var question: String?
+    /// Suggested answers the person can pick from (ask_user).
+    var choices: [String]?
     var x: Double?
     var y: Double?
     var text: String?
@@ -213,6 +223,8 @@ nonisolated struct AgentAction: Codable, Equatable {
             return summary ?? ""
         case .mistake:
             return summary ?? ""
+        case .askUser:
+            return "\"\(String((question ?? "").prefix(80)))\""
         case .unknown:
             return type
         }
@@ -285,6 +297,8 @@ nonisolated struct AgentAction: Codable, Equatable {
             return "call it done"
         case .fail:
             return "report that this cannot be done"
+        case .askUser:
+            return "ask you: \(String((question ?? "a question").prefix(60)))"
         case .verify, .headStart, .replay, .mistake, .unknown:
             return kind.label.lowercased()
         }
@@ -545,7 +559,9 @@ nonisolated struct AgentAction: Codable, Equatable {
         }
         let parts: [String] = [
             kind.rawValue,
-            "\(element ?? -1)",
+            // The control itself when known — a badge number means something
+            // else on every rescan.
+            targetKey ?? "\(element ?? -1)",
             "\(Int(x ?? -1))",
             "\(Int(y ?? -1))",
             text ?? "",

@@ -42,8 +42,9 @@ nonisolated enum DifficultyScout {
     ]
 
     /// Above this many elements a page is busy enough that the fast model starts
-    /// mis-aiming.
-    private static let busyPageElementCount = 14
+    /// mis-aiming. Most real pages list 15-30 controls on one screen, so a lower
+    /// bar made nearly every step "busy" and the cheap tiers went unused.
+    private static let busyPageElementCount = 40
     /// This many identically-named targets on screen is a look-alike trap.
     private static let lookAlikeThreshold = 4
 
@@ -60,7 +61,9 @@ nonisolated enum DifficultyScout {
             )
         }
 
-        let lower = (signals.lastResult ?? "").lowercased()
+        // Only the app's own verdict wording counts: a result line also echoes
+        // element names and typed text, and "Report an error" is not an error.
+        let lower = Wording.appAuthored(signals.lastResult ?? "").lowercased()
         if lower.contains("no visible reaction") {
             score += 2
             reasons.append("the last move got no reaction")
@@ -106,14 +109,14 @@ nonisolated enum DifficultyScout {
             reasons.append("a busy page with \(observation.elements.count) choices")
         }
 
+        // Informational only. A "Buy now" button somewhere on screen says nothing
+        // about whether THIS step will press it; the loop checks the move the
+        // model actually chose, and escalates that one if it commits.
         let isIrreversible = observation.elements.contains { element in
-            let name = element.name.lowercased()
-            guard !name.isEmpty, element.kind == .button || element.kind == .link else { return false }
-            return irreversibleWords.contains { name.contains($0) }
+            guard element.kind == .button || element.kind == .link else { return false }
+            return OnDeviceGate.isIrreversible(element.name)
         }
-        if isIrreversible {
-            reasons.append("an irreversible move is on screen")
-        }
+        let irreversibleReason = "an irreversible move is on screen"
 
         let difficulty: StepDifficulty
         switch score {
@@ -125,10 +128,13 @@ nonisolated enum DifficultyScout {
         if difficulty == .routine {
             return DifficultyRead(
                 difficulty: .routine,
-                reasons: ["a simple page with \(observation.elements.count) choices"],
-                isIrreversible: false,
+                reasons: ["a simple page with \(observation.elements.count) choices"] + (isIrreversible ? [irreversibleReason] : []),
+                isIrreversible: isIrreversible,
                 isFlyingBlind: false
             )
+        }
+        if isIrreversible {
+            reasons.append(irreversibleReason)
         }
 
         return DifficultyRead(

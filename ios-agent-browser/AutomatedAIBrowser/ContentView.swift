@@ -83,6 +83,13 @@ struct ContentView: View {
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
 
+            if agent.pendingQuestion != nil {
+                QuestionCard()
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+
             if agent.isRunning {
                 MissionProgressLine()
                     .padding(.top, 8)

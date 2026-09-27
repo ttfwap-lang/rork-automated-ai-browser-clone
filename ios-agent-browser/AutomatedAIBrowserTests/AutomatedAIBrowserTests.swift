@@ -678,8 +678,10 @@ struct AutomatedAIBrowserTests {
         let blind = DifficultyRead(difficulty: .routine, reasons: [], isIrreversible: false, isFlyingBlind: true)
         #expect(routed(blind, preferred: .fast).choice == .precise)
 
+        // A risky control merely on screen no longer forces the frontier model:
+        // the move actually chosen is checked instead (escalationForCommittingMove).
         let risky = DifficultyRead(difficulty: .routine, reasons: [], isIrreversible: true, isFlyingBlind: false)
-        #expect(routed(risky, preferred: .fast).choice == .precise)
+        #expect(routed(risky, preferred: .fast).choice == .fast)
 
         #expect(routed(routine, preferred: .fast, mustEscalate: true).choice == .precise)
 
@@ -778,13 +780,17 @@ struct AutomatedAIBrowserTests {
     }
 
     @Test func scoringRemembersMovesThatAlreadyFailed() {
+        let observation = page([target(1)])
         var action = AgentAction(type: "tap_element")
         action.element = 1
+        // The loop records failures with the target resolved, exactly as here.
+        var failed = action
+        failed.targetKey = target(1).targetKey(in: observation, urlString: "")
         let scored = CandidateScorer.score(
             [MoveCandidate(action: action, rationale: "again", confidence: 0.9)],
             in: CandidateScorer.Context(
-                observation: page([target(1)]),
-                failedSignatures: [action.repetitionSignature]
+                observation: observation,
+                failedSignatures: [failed.repetitionSignature]
             )
         )
         #expect(scored[0].score < 0.5)
@@ -1368,7 +1374,9 @@ struct AutomatedAIBrowserTests {
         }
         #expect(choice(isFirstStep: true) == .precise)
         #expect(choice(mustEscalate: true) == .precise)
-        #expect(choice(irreversible: true) == .precise)
+        // The free tier's own gate refuses irreversible taps, and a committing
+        // move from any cheaper tier is re-decided on the precise model.
+        #expect(choice(irreversible: true) == .onDevice)
         #expect(choice(blind: true) == .precise)
         #expect(choice() == .onDevice)
     }

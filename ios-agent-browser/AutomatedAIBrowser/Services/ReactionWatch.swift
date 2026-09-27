@@ -147,7 +147,7 @@ nonisolated enum ReactionWatch {
 
     /// False when the result line already says the move never happened.
     static func shouldAttachVerdict(to result: String) -> Bool {
-        let lower = result.lowercased()
+        let lower = Wording.appAuthored(result).lowercased()
         let neverRan = [
             "no action taken", "no longer on the page", "missing", "error",
             "not supported", "not a typeable field", "nothing at that point",
@@ -159,8 +159,12 @@ nonisolated enum ReactionWatch {
     /// The single source of truth for "that move failed": what escalates the next
     /// step to the frontier model, records a dead end at the current checkpoint,
     /// and puts the runner-up move back on the table.
+    ///
+    /// Reads only the app's own wording: quoted page content and addresses are
+    /// stripped first, so tapping a button named "Report an error" or typing
+    /// "missing dog" into a search box is not mistaken for a failed move.
     static func readsAsFailure(_ result: String) -> Bool {
-        let lower = result.lowercased()
+        let lower = Wording.appAuthored(result).lowercased()
         let signals = [
             noReactionPhrase, "no longer on the page", "couldn't", "could not",
             "no action taken", "error", "missing", "nothing at that point",
@@ -175,43 +179,217 @@ nonisolated enum ReactionWatch {
     /// success. Kept apart from `readsAsFailure` so the live panel can colour it
     /// amber instead of lying in either direction.
     static func readsAsNoReaction(_ result: String) -> Bool {
-        result.localizedCaseInsensitiveContains(noReactionPhrase)
+        Wording.appAuthored(result).localizedCaseInsensitiveContains(noReactionPhrase)
     }
 
     // MARK: - In-page watcher scripts
 
-    static let startScript = #"""
+    /// Sorts a batch of mutation records into `out.hard` (content changed, a
+    /// meaningful state flipped, or the change touched the target itself) and
+    /// `out.soft` (style/class churn somewhere else — carousels, timers, ads).
+    /// The agent's own ripple never counts.
+    static let sortFunction = #"""
+        function __rorkSort(list, target, out) {
+          var MEANINGFUL = { 'aria-expanded':1, 'aria-selected':1, 'aria-checked':1, 'aria-pressed':1, 'aria-hidden':1, 'aria-busy':1, 'open':1, 'checked':1, 'selected':1, 'disabled':1, 'hidden':1, 'value':1 };
+          var SKIP = { SCRIPT:1, STYLE:1, LINK:1, META:1, NOSCRIPT:1 };
+          function agentNode(n) {
+            return n && n.nodeType === 1 && (n.id === '__agent_css' || (n.classList && n.classList.contains('__agent_ripple')));
+          }
+          function related(n) {
+            if (!target || !n || n.nodeType !== 1) { return false; }
+            try { return n === target || target.contains(n) || n.contains(target); } catch (e) { return false; }
+          }
+          function counts(n) { return !agentNode(n) && !(n && n.nodeType === 1 && SKIP[n.tagName]); }
+          for (var i = 0; i < list.length; i++) {
+            var m = list[i];
+            if (agentNode(m.target)) { continue; }
+            if (m.type === 'attributes') {
+              if (MEANINGFUL[m.attributeName] || related(m.target)) { out.hard++; } else { out.soft++; }
+              continue;
+            }
+            if (m.type === 'childList') {
+              var real = 0;
+              for (var a = 0; a < m.addedNodes.length; a++) { if (counts(m.addedNodes[a])) { real++; } }
+              for (var r = 0; r < m.removedNodes.length; r++) { if (counts(m.removedNodes[r])) { real++; } }
+              if (real === 0) { continue; }
+              out.added += real;
+              out.hard++;
+              continue;
+            }
+            out.hard++;
+          }
+        }
+        """#
+
+    /// Counts the page's own fetch/XHR requests, so settling can wait for a
+    /// reaction that is still on its way from the network. Requests pending for
+    /// more than a few seconds are treated as long-polls and ignored.
+    static let networkFunctions = #"""
+        function __rorkNetInstall() {
+          if (window.__rorkNet) { return; }
+          var net = { pending: {}, seq: 0 };
+          window.__rorkNet = net;
+          function begin() { var id = ++net.seq; net.pending[id] = Date.now(); return id; }
+          function end(id) { delete net.pending[id]; }
+          try {
+            var of = window.fetch;
+            if (typeof of === 'function') {
+              window.fetch = function() {
+                var id = begin();
+                var p;
+                try { p = of.apply(window, arguments); } catch (e) { end(id); throw e; }
+                try { p.then(function(){ end(id); }, function(){ end(id); }); } catch (e) { end(id); }
+                return p;
+              };
+            }
+          } catch (e) {}
+          try {
+            var xs = XMLHttpRequest.prototype.send;
+            XMLHttpRequest.prototype.send = function() {
+              var id = begin();
+              try { this.addEventListener('loadend', function(){ end(id); }); } catch (e) { end(id); }
+              try { return xs.apply(this, arguments); } catch (e) { end(id); throw e; }
+            };
+          } catch (e) {}
+        }
+        function __rorkInflight() {
+          var net = window.__rorkNet;
+          if (!net) { return 0; }
+          var now = Date.now(), n = 0;
+          for (var k in net.pending) {
+            if (now - net.pending[k] < 4000) { n++; } else { delete net.pending[k]; }
+          }
+          return n;
+        }
+        """#
+
+    /// Installs the long-lived quiet observer (and the request counter) in the
+    /// current document. Idempotent. `last` moves only on hard changes, so a
+    /// spinning carousel cannot keep a page from ever reading as settled.
+    static let quietInstallFunction = #"""
+        function __rorkQuietInstall() {
+          var q = window.__rorkQuiet;
+          if (q && q.obs) { return q; }
+          q = { t0: Date.now(), last: Date.now(), hard: 0, soft: 0 };
+          q.obs = new MutationObserver(function(list){
+            var out = { hard: 0, soft: 0, added: 0 };
+            __rorkSort(list, null, out);
+            q.hard += out.hard;
+            q.soft += out.soft;
+            if (out.hard > 0) { q.last = Date.now(); }
+          });
+          q.obs.observe(document.documentElement, { subtree: true, childList: true, attributes: true, characterData: true });
+          window.__rorkQuiet = q;
+          __rorkNetInstall();
+          return q;
+        }
+        """#
+
+    static let quietInstallScript = """
         (function(){
           try {
+            \(sortFunction)
+            \(networkFunctions)
+            \(quietInstallFunction)
+            __rorkQuietInstall();
+            return 'ok';
+          } catch (e) { return 'quiet error: ' + e.message; }
+        })()
+        """
+
+    /// How long since the page last really changed, and how many requests are
+    /// still out. `ok: false` means the document was replaced since install.
+    static let quietProbeScript = """
+        (function(){
+          try {
+            \(networkFunctions)
+            var q = window.__rorkQuiet;
+            if (!q) { return JSON.stringify({ ok: false }); }
+            return JSON.stringify({ ok: true, since: Date.now() - q.last, inflight: __rorkInflight() });
+          } catch (e) { return JSON.stringify({ ok: false }); }
+        })()
+        """
+
+    /// Starts the background-noise baseline once the page has settled. Whatever
+    /// churn happens between now and the next move is the page's own idle rate.
+    static let markBaselineScript = #"""
+        (function(){
+          try {
+            var q = window.__rorkQuiet;
+            if (!q) { return 'no quiet observer'; }
+            q.bt0 = Date.now(); q.bh = q.hard; q.bs = q.soft;
+            return 'ok';
+          } catch (e) { return 'baseline error: ' + e.message; }
+        })()
+        """#
+
+    /// Result of one quiet probe.
+    nonisolated struct Quiet: Equatable {
+        let ok: Bool
+        /// Seconds since the last hard change.
+        let quietFor: TimeInterval
+        let inflight: Int
+    }
+
+    nonisolated private struct QuietPayload: Decodable {
+        let ok: Bool
+        let since: Double?
+        let inflight: Int?
+    }
+
+    static func parseQuiet(_ raw: String) -> Quiet {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.first == "{",
+              let payload = try? JSONDecoder().decode(QuietPayload.self, from: Data(trimmed.utf8)),
+              payload.ok
+        else { return Quiet(ok: false, quietFor: 0, inflight: 0) }
+        return Quiet(ok: true, quietFor: max(0, (payload.since ?? 0) / 1000), inflight: max(0, payload.inflight ?? 0))
+    }
+
+    /// True once the page has gone this long without a hard change and has no
+    /// request still out.
+    static func isSettled(_ quiet: Quiet, window: TimeInterval = 0.35) -> Bool {
+        quiet.ok && quiet.quietFor >= window && quiet.inflight == 0
+    }
+
+    /// Starts the watcher around one move. `targetID` is the element's number in
+    /// the frame the script runs in; changes on, inside or around it always count.
+    static func startScript(targetID: Int?) -> String {
+        let target = targetID.map(String.init) ?? "null"
+        return """
+        (function(){
+          try {
+            \(sortFunction)
+            \(networkFunctions)
+            \(quietInstallFunction)
             if (window.__rorkWatch && window.__rorkWatch.obs) { try { window.__rorkWatch.obs.disconnect(); } catch (e) {} }
+            var q = __rorkQuietInstall();
+            var TARGET = \(target);
+            var target = null;
+            try {
+              var reg = window.__rorkAgent && window.__rorkAgent.els;
+              if (reg && TARGET !== null) { target = reg[TARGET] || null; }
+            } catch (e) {}
             var SEL = 'a[href],button,input,select,textarea,[role="button"],[role="link"],[role="menuitem"],[role="option"],[role="checkbox"],[role="switch"]';
-            var w = { muts: 0, added: 0, url: location.href, count0: -1 };
+            var now = Date.now();
+            var w = { hard: 0, soft: 0, added: 0, url: location.href, count0: -1, t0: now, base: null };
+            if (q.bt0) { w.base = { t: now - q.bt0, hard: q.hard - q.bh, soft: q.soft - q.bs }; }
             try { w.count0 = document.querySelectorAll(SEL).length; } catch (e) {}
-            function agentNode(n) {
-              return n && n.nodeType === 1 && (n.id === '__agent_css' || (n.classList && n.classList.contains('__agent_ripple')));
-            }
             w.obs = new MutationObserver(function(list){
-              if (w.muts >= 500) { try { w.obs.disconnect(); } catch (e) {} return; }
-              for (var i = 0; i < list.length; i++) {
-                var m = list[i];
-                if (agentNode(m.target)) { continue; }
-                if (m.type === 'childList') {
-                  var real = 0;
-                  for (var a = 0; a < m.addedNodes.length; a++) { if (!agentNode(m.addedNodes[a])) { real++; } }
-                  for (var r = 0; r < m.removedNodes.length; r++) { if (!agentNode(m.removedNodes[r])) { real++; } }
-                  if (real === 0) { continue; }
-                  w.added += real;
-                }
-                w.muts++;
-              }
+              if (w.hard + w.soft >= 2000) { try { w.obs.disconnect(); } catch (e) {} return; }
+              __rorkSort(list, target, w);
             });
             w.obs.observe(document.documentElement, { subtree: true, childList: true, attributes: true, characterData: true });
             window.__rorkWatch = w;
             return 'ok';
           } catch (e) { return 'watch error: ' + e.message; }
         })()
-        """#
+        """
+    }
 
+    /// Stops the watcher. Background churn is subtracted at twice the page's own
+    /// idle rate, so a ticking page does not make every move look like it worked;
+    /// on a quiet page nothing is subtracted.
     static let endScript = #"""
         (function(){
           try {
@@ -223,7 +401,13 @@ nonisolated enum ReactionWatch {
             var now = -1;
             try { now = document.querySelectorAll(SEL).length; } catch (e) {}
             var delta = (w.count0 >= 0 && now >= 0) ? (now - w.count0) : 0;
-            return JSON.stringify({ ok: true, muts: w.muts, added: w.added, urlChanged: location.href !== w.url, newInteractive: Math.max(delta, 0) });
+            var dur = Math.max(1, Date.now() - w.t0);
+            var hard = w.hard, soft = w.soft;
+            if (w.base && w.base.t >= 800) {
+              hard = Math.max(0, hard - Math.ceil(2 * (w.base.hard / w.base.t) * dur));
+              soft = Math.max(0, soft - Math.ceil(2 * (w.base.soft / w.base.t) * dur));
+            }
+            return JSON.stringify({ ok: true, muts: Math.min(hard + soft, 500), added: w.added, urlChanged: location.href !== w.url, newInteractive: Math.max(delta, 0) });
           } catch (e) { return JSON.stringify({ ok: false }); }
         })()
         """#

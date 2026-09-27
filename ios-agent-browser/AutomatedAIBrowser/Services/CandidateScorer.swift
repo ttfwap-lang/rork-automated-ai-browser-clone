@@ -10,11 +10,23 @@ nonisolated enum CandidateScorer {
         /// Signatures of moves already tried in this run that did not work.
         let failedSignatures: Set<String>
         let currentTask: MissionTask?
+        /// The page the candidates are for; scopes each target's identity.
+        let urlString: String
+        /// The specific things the goal names (`GoalDetails`).
+        let goalDetails: [String]
 
-        init(observation: PageObservation?, failedSignatures: Set<String> = [], currentTask: MissionTask? = nil) {
+        init(
+            observation: PageObservation?,
+            failedSignatures: Set<String> = [],
+            currentTask: MissionTask? = nil,
+            urlString: String = "",
+            goalDetails: [String] = []
+        ) {
             self.observation = observation
             self.failedSignatures = failedSignatures
             self.currentTask = currentTask
+            self.urlString = urlString
+            self.goalDetails = goalDetails
         }
     }
 
@@ -29,14 +41,23 @@ nonisolated enum CandidateScorer {
     static func score(_ candidates: [MoveCandidate], in context: Context) -> [MoveCandidate] {
         let taskWords = keywords(from: context.currentTask.map { "\($0.title) \($0.doneWhen)" } ?? "")
         let taskWantsRisk = context.currentTask.map { task in
-            let text = "\(task.title) \(task.doneWhen)".lowercased()
-            return DifficultyScout.irreversibleWords.contains { text.contains($0) }
+            OnDeviceGate.isIrreversible("\(task.title) \(task.doneWhen)")
         } ?? false
 
         let scored: [(offset: Int, candidate: MoveCandidate)] = candidates.enumerated().map { offset, candidate in
             var value = max(0, min(1, candidate.confidence))
             var notes: [String] = []
-            let action = candidate.action
+            var action = candidate.action
+
+            // Resolve the target now, before anything is judged: the risk check
+            // reads its name and the failure memory keys on its identity. Left
+            // until after scoring, a "Place order" candidate looked harmless.
+            if let elementID = action.element,
+               let observation = context.observation,
+               let element = observation.element(withID: elementID) {
+                if action.elementName == nil { action.elementName = element.shortDescriptor }
+                action.targetKey = element.targetKey(in: observation, urlString: context.urlString)
+            }
 
             if let elementID = action.element {
                 if let observation = context.observation {
@@ -72,12 +93,21 @@ nonisolated enum CandidateScorer {
                 }
             }
 
+            if !context.goalDetails.isEmpty {
+                let said = [candidate.rationale, action.elementName ?? "", action.text ?? "", action.url ?? "", action.option ?? ""]
+                    .joined(separator: " ")
+                if context.goalDetails.contains(where: { Wording.containsPhrase(said, $0) }) {
+                    value += 0.08
+                    notes.append("uses a specific from the goal")
+                }
+            }
+
             let targetText = [
                 action.elementName ?? "",
                 action.option ?? "",
                 action.text ?? "",
             ].joined(separator: " ").lowercased()
-            let isRisky = action.submit == true || DifficultyScout.irreversibleWords.contains { targetText.contains($0) }
+            let isRisky = action.submit == true || OnDeviceGate.isIrreversible(targetText)
             if isRisky {
                 if taskWantsRisk {
                     value += 0.05
@@ -88,7 +118,12 @@ nonisolated enum CandidateScorer {
                 }
             }
 
-            var result = candidate
+            var result = MoveCandidate(
+                id: candidate.id,
+                action: action,
+                rationale: candidate.rationale,
+                confidence: candidate.confidence
+            )
             result.score = max(0, min(1, value))
             result.note = notes.isEmpty ? "nothing against it on this page" : notes.joined(separator: " · ")
             return (offset, result)

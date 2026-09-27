@@ -16,7 +16,7 @@ nonisolated enum FormScripts {
           \#(PageScanner.findFunction)
           try {
             var el = __find(\#(id), \#(PageScanner.jsStringLiteral(expectedName)), false);
-            if (!el) { return 'element \#(display) is no longer on the page — the page changed; look again before acting'; }
+            if (!el) { return \#(PageScanner.missExpression(display: display)); }
             var want = \#(PageScanner.jsStringLiteral(option));
             var wantLow = want.replace(/\s+/g, ' ').trim().toLowerCase();
             try { el.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' }); } catch (e) {}
@@ -65,7 +65,7 @@ nonisolated enum FormScripts {
           \#(PageScanner.findFunction)
           try {
             var el = __find(\#(id), \#(PageScanner.jsStringLiteral(expectedName)), false);
-            if (!el) { return 'element \#(display) is no longer on the page — the page changed; look again before acting'; }
+            if (!el) { return \#(PageScanner.missExpression(display: display)); }
             var want = \#(on ? "true" : "false");
             function state(t) {
               if (typeof t.checked === 'boolean') { return t.checked; }
@@ -113,7 +113,7 @@ nonisolated enum FormScripts {
           try {
             var p = \#(String(format: "%.1f", clamped));
             var el = __find(\#(id), \#(PageScanner.jsStringLiteral(expectedName)), false);
-            if (!el) { return 'element \#(display) is no longer on the page — the page changed; look again before acting'; }
+            if (!el) { return \#(PageScanner.missExpression(display: display)); }
             var isRange = el.tagName === 'INPUT' && (el.type || '').toLowerCase() === 'range';
             var isAria = el.getAttribute && (el.getAttribute('role') === 'slider' || el.getAttribute('aria-valuenow') != null);
             if (!isRange && !isAria && el.querySelector) {

@@ -46,6 +46,10 @@ struct ActionFeedSheet: View {
                 ApprovalControls(showReasoning: false)
                     .padding(.horizontal, 16)
                     .padding(.bottom, 8)
+            } else if agent.pendingQuestion != nil {
+                QuestionCard()
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 8)
             }
         }
         .sheet(item: $visionStep) { step in

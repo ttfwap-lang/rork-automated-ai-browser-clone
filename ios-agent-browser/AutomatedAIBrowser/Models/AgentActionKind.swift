@@ -30,6 +30,8 @@ nonisolated enum AgentActionKind: String, Codable, CaseIterable {
     case rewind
     case done
     case fail
+    /// Pause and ask the watching person one question the page cannot answer.
+    case askUser = "ask_user"
     /// The app's own independent-check entry — never callable by the model.
     case verify = "independent_check"
     /// The app's own head-start entry, summarising moves replayed from memory.
@@ -69,6 +71,7 @@ nonisolated enum AgentActionKind: String, Codable, CaseIterable {
         case .rewind: "REWIND"
         case .done: "DONE"
         case .fail: "FAIL"
+        case .askUser: "QUESTION"
         case .verify: "CHECK"
         case .headStart: "HEAD START"
         case .replay: "ONE-TAP REPLAY"
@@ -103,6 +106,7 @@ nonisolated enum AgentActionKind: String, Codable, CaseIterable {
         case .rewind: "arrow.uturn.backward.circle.fill"
         case .done: "checkmark.seal.fill"
         case .fail: "xmark.octagon.fill"
+        case .askUser: "questionmark.bubble.fill"
         case .verify: "checkmark.shield.fill"
         case .headStart: "bolt.horizontal.fill"
         case .replay: "bolt.badge.clock.fill"
@@ -123,7 +127,7 @@ nonisolated enum AgentActionKind: String, Codable, CaseIterable {
     /// Moves that change the plan or end the run rather than touching the page.
     var isPageAction: Bool {
         switch self {
-        case .revisePlan, .rewind, .done, .fail, .verify, .headStart, .replay, .mistake, .unknown: false
+        case .revisePlan, .rewind, .done, .fail, .askUser, .verify, .headStart, .replay, .mistake, .unknown: false
         default: true
         }
     }

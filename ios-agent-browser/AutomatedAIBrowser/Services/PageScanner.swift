@@ -27,7 +27,7 @@ nonisolated enum PageScanner {
         let elements: [ScannedElement] = (payload.els ?? []).compactMap { element in
             let rect = element.r ?? []
             guard rect.count == 4 else { return nil }
-            return ScannedElement(
+            var scanned = ScannedElement(
                 id: element.i,
                 kind: ScannedElement.Kind(rawValue: element.k ?? "") ?? .other,
                 name: element.n ?? "",
@@ -39,6 +39,10 @@ nonisolated enum PageScanner {
                 width: rect[2],
                 height: rect[3]
             )
+            scanned.context = nonEmpty(element.c)
+            scanned.linkHint = nonEmpty(element.h)
+            scanned.inputType = nonEmpty(element.t)
+            return scanned
         }
         return PageObservation(
             elements: elements,
@@ -77,6 +81,17 @@ nonisolated enum PageScanner {
         let v: String?
         let e: Bool?
         let r: [Double]?
+        /// Nearest heading or labelled container (look-alikes and unlabeled only).
+        let c: String?
+        /// Where a link goes (look-alikes and unlabeled only).
+        let h: String?
+        /// Input type for non-text fields, e.g. "email".
+        let t: String?
+    }
+
+    private static func nonEmpty(_ value: String?) -> String? {
+        guard let value = value?.trimmed, !value.isEmpty else { return nil }
+        return value
     }
 
     // MARK: - Action scripts
@@ -93,7 +108,7 @@ nonisolated enum PageScanner {
           try {
             var id = \#(id);
             var el = __find(id, \#(jsStringLiteral(expectedName)), false);
-            if (!el) { return 'element \#(display) is no longer on the page — the page changed; look again before acting'; }
+            if (!el) { return \#(missExpression(display: display)); }
             try { el.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' }); } catch (e) { try { el.scrollIntoView(); } catch (e2) {} }
             var r = el.getBoundingClientRect();
             var x = Math.max(1, Math.min(window.innerWidth - 1, r.left + r.width / 2));
@@ -116,7 +131,7 @@ nonisolated enum PageScanner {
             }
             var extra = '';
             if (el.type === 'checkbox' || el.type === 'radio') { extra = el.checked ? ' — now checked' : ' — now unchecked'; }
-            return 'tapped [\#(display)] ' + desc + extra;
+            return 'tapped [\#(display)] ' + desc + extra + \#(rematchNoteExpression);
           } catch (e) { return 'tap error: ' + e.message; }
         })()
         """#
@@ -134,7 +149,7 @@ nonisolated enum PageScanner {
             var t = \#(jsStringLiteral(text));
             var doSubmit = \#(submit ? "true" : "false");
             var el = __find(id, \#(jsStringLiteral(expectedName)), true);
-            if (!el) { return 'element \#(display) is no longer on the page — the page changed; look again before acting'; }
+            if (!el) { return \#(missExpression(display: display)); }
             var desc = \#(jsStringLiteral(descriptor));
             if (!desc) {
               var txt = (((el.getAttribute && el.getAttribute('aria-label')) || el.placeholder || '') + '').replace(/\s+/g, ' ').trim().slice(0, 40);
@@ -166,7 +181,7 @@ nonisolated enum PageScanner {
               el.dispatchEvent(new KeyboardEvent('keyup', ke));
               if (el.form) { if (el.form.requestSubmit) { el.form.requestSubmit(); } else { el.form.submit(); } }
             }
-            return 'typed "' + t.slice(0, 40) + '" into [\#(display)] ' + desc + (doSubmit ? ' — submitted' : '');
+            return 'typed "' + t.slice(0, 40) + '" into [\#(display)] ' + desc + (doSubmit ? ' — submitted' : '') + \#(rematchNoteExpression);
           } catch (e) { return 'type error: ' + e.message; }
         })()
         """#
@@ -214,12 +229,20 @@ nonisolated enum PageScanner {
 
     /// Registry lookup with stale-element recovery: exact registry hit first,
     /// then a name re-match across interactive elements (fields only when typing).
+    ///
+    /// A re-match must be unambiguous: exactly one control carrying the name, or
+    /// failing that exactly one whose name contains it. Several look-alikes is a
+    /// miss, never a guess — pressing the wrong "Add to cart" is worse than
+    /// looking again. `window.__rorkFindHow` records how the element was found
+    /// (`exact`, `rematched`, `ambiguous`, `gone`) so the result line can say so.
     /// Shared with FormScripts and GestureScripts.
     static let findFunction = #"""
         function __find(id, wantName, fieldsOnly) {
+            window.__rorkFindHow = 'exact';
             var reg = (window.__rorkAgent && window.__rorkAgent.els) || {};
             var el = reg[id];
             if (el && el.isConnected) { return el; }
+            window.__rorkFindHow = 'gone';
             var want = (wantName || '').replace(/\s+/g, ' ').trim().toLowerCase();
             if (!want) { return null; }
             var sel = fieldsOnly
@@ -227,19 +250,31 @@ nonisolated enum PageScanner {
               : 'a[href],button,input,select,textarea,summary,[role="button"],[role="link"],[role="checkbox"],[role="radio"],[role="switch"],[role="tab"],[role="menuitem"],[role="option"],[role="combobox"],[onclick],[contenteditable="true"],[contenteditable=""]';
             var all;
             try { all = document.querySelectorAll(sel); } catch (e) { return null; }
-            var best = null;
+            var exact = [], partial = [];
             for (var i = 0; i < all.length; i++) {
               var c = all[i];
               var r = c.getBoundingClientRect();
               if (r.width < 2 || r.height < 2) { continue; }
               var t = (((c.getAttribute && c.getAttribute('aria-label')) || '') + ' ' + (c.placeholder || '') + ' ' + (c.innerText || c.value || '')).replace(/\s+/g, ' ').trim().toLowerCase();
               if (!t) { continue; }
-              if (t === want) { return c; }
-              if (!best && (t.indexOf(want) !== -1 || want.indexOf(t) !== -1)) { best = c; }
+              if (t === want) { exact.push(c); continue; }
+              if (t.length >= 3 && (t.indexOf(want) !== -1 || want.indexOf(t) !== -1)) { partial.push(c); }
             }
-            return best;
+            var pick = null;
+            if (exact.length === 1) { pick = exact[0]; }
+            else if (exact.length === 0 && partial.length === 1) { pick = partial[0]; }
+            window.__rorkFindHow = pick ? 'rematched' : ((exact.length + partial.length) > 1 ? 'ambiguous' : 'gone');
+            return pick;
         }
         """#
+
+    /// The miss line for a failed lookup, and the note for a successful re-match.
+    /// Both are JS expressions evaluated right after `__find`.
+    static func missExpression(display: Int) -> String {
+        #"(window.__rorkFindHow === 'ambiguous' ? 'element \#(display) is no longer on the page — the page re-drew it and several controls now share its name; look again before acting' : 'element \#(display) is no longer on the page — the page changed; look again before acting')"#
+    }
+
+    static let rematchNoteExpression = #"(window.__rorkFindHow === 'rematched' ? ' (found again by its name — the page had re-drawn it)' : '')"#
 
     /// Escapes a Swift string into a safe JS string literal.
     static func jsStringLiteral(_ value: String) -> String {
@@ -528,20 +563,78 @@ nonisolated enum PageScanner {
 
             if (kept.length > MAX) { moreVisible += kept.length - MAX; kept = kept.slice(0, MAX); }
 
+            // Look-alikes ("Add to cart" x4) and unlabeled controls are useless
+            // to the model without saying WHICH one: give those the nearest
+            // heading or labelled container, and where a link goes. Its own
+            // small budget, so a slow page still returns a list.
+            var ctxStart = Date.now();
+            var CTX_BUDGET = 40;
+            function contextOf(el, ownName) {
+              var own = ownName.toLowerCase();
+              var node = el.parentElement, hops = 0;
+              while (node && node !== document.body && hops < 8) {
+                var h = null;
+                try { h = node.querySelector('h1,h2,h3,h4,h5,h6,[role="heading"]'); } catch (e) {}
+                if (h && h !== el && !(el.contains && el.contains(h))) {
+                  var ht = clean(h.innerText || h.textContent);
+                  if (ht && ht.toLowerCase() !== own) { return ht.slice(0, 50); }
+                }
+                var al = clean(node.getAttribute && node.getAttribute('aria-label'));
+                if (al && al.toLowerCase() !== own) { return al.slice(0, 50); }
+                node = node.parentElement;
+                hops++;
+              }
+              return '';
+            }
+            function hrefOf(el) {
+              try {
+                var a = (el.closest && el.closest('a[href]')) || null;
+                if (!a) { return ''; }
+                var u = new URL(a.getAttribute('href'), document.baseURI);
+                if (u.protocol !== 'http:' && u.protocol !== 'https:') { return ''; }
+                var shown = (u.host === location.host ? '' : u.host) + u.pathname + u.search;
+                return shown.length > 48 ? shown.slice(0, 47) + '…' : shown;
+              } catch (e) { return ''; }
+            }
+            function inputTypeOf(el, kind) {
+              if (kind !== 'field' || (el.tagName || '').toLowerCase() !== 'input') { return ''; }
+              var t = (el.type || '').toLowerCase();
+              return (t === 'text' || t === 'search' || !t) ? '' : t;
+            }
+
+            var names = [];
+            var nameCounts = {};
+            for (var n1 = 0; n1 < kept.length; n1++) {
+              var nm = nameOf(kept[n1].el, kept[n1].k);
+              names.push(nm);
+              var key = kept[n1].k + '|' + nm.toLowerCase();
+              nameCounts[key] = (nameCounts[key] || 0) + 1;
+            }
+
             window.__rorkAgent = { els: {} };
             var els = [];
             for (var n2 = 0; n2 < kept.length; n2++) {
               var it = kept[n2], num = n2 + 1;
               window.__rorkAgent.els[num] = it.el;
               try { it.el.setAttribute('data-rork-agent', String(num)); } catch (e) {}
+              var name = names[n2];
+              var needsContext = !name || nameCounts[it.k + '|' + name.toLowerCase()] > 1;
+              var ctx = '', href = '';
+              if (needsContext && Date.now() - ctxStart < CTX_BUDGET) {
+                try { ctx = contextOf(it.el, name); } catch (e) {}
+                if (it.k === 'link' || it.k === 'button' || it.k === 'other') { href = hrefOf(it.el); }
+              }
               els.push({
                 i: num,
                 k: it.k,
-                n: nameOf(it.el, it.k),
+                n: name,
                 s: statesOf(it.el, it.k),
                 v: valueOf(it.el, it.k),
                 e: it.k === 'field',
-                r: [Math.round(it.r.left), Math.round(it.r.top), Math.round(it.r.width), Math.round(it.r.height)]
+                r: [Math.round(it.r.left), Math.round(it.r.top), Math.round(it.r.width), Math.round(it.r.height)],
+                c: ctx,
+                h: href,
+                t: inputTypeOf(it.el, it.k)
               });
             }
 

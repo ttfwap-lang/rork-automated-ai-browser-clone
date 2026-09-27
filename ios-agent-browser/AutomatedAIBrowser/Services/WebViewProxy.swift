@@ -106,14 +106,41 @@ final class WebViewProxy: NSObject, WKNavigationDelegate, WKUIDelegate {
     func reload() { webView.reload() }
     func stopLoading() { webView.stopLoading() }
 
-    /// Waits until the page stops loading (or the timeout passes), plus a short settle delay.
+    /// Longest the page gets to stop changing once loading has finished.
+    private static let maxDOMSettle: TimeInterval = 2.0
+
+    /// Waits until the page stops loading, then until the page itself stops
+    /// changing — client-side route changes never set `isLoading`, so the load
+    /// flag alone let the agent look at half-drawn pages. Bounded by `maxWait`.
     func waitForQuiet(maxWait: TimeInterval) async {
         let start = Date()
         try? await Task.sleep(for: .milliseconds(250))
         while webView.isLoading && Date().timeIntervalSince(start) < maxWait && !Task.isCancelled {
             try? await Task.sleep(for: .milliseconds(250))
         }
-        try? await Task.sleep(for: .milliseconds(350))
+        let remaining = max(0, maxWait - Date().timeIntervalSince(start))
+        await settle(minimum: 0.3, maximum: min(Self.maxDOMSettle, max(0.35, remaining)))
+        // Churn from here to the next move is this page's idle background rate,
+        // which the reaction watcher subtracts.
+        _ = await runJS(ReactionWatch.markBaselineScript)
+    }
+
+    /// Waits at least `minimum`, then until the page has had no real change for
+    /// a moment and no request it sent is still out, or until `maximum`.
+    func settle(minimum: TimeInterval, maximum: TimeInterval, in frame: WKFrameInfo? = nil) async {
+        let start = Date()
+        _ = await runJS(ReactionWatch.quietInstallScript, in: frame)
+        try? await Task.sleep(for: .seconds(minimum))
+        while !Task.isCancelled && Date().timeIntervalSince(start) < maximum {
+            let quiet = ReactionWatch.parseQuiet(await runJS(ReactionWatch.quietProbeScript, in: frame))
+            if quiet.ok {
+                if ReactionWatch.isSettled(quiet) && !webView.isLoading { return }
+            } else {
+                // A new document replaced the old one; watch that one from here.
+                _ = await runJS(ReactionWatch.quietInstallScript, in: frame)
+            }
+            try? await Task.sleep(for: .milliseconds(150))
+        }
     }
 
     // MARK: - Bounded Async Helper
@@ -319,6 +346,38 @@ final class WebViewProxy: NSObject, WKNavigationDelegate, WKUIDelegate {
     /// not just the visible part.
     func extractText() async -> String {
         await runJS(PageReader.readScript)
+    }
+
+    /// For each quote, whether it appears word for word in the page's text
+    /// (case, spacing and curly-vs-straight quotes ignored). This is what makes a
+    /// recorded fact evidence rather than a claim.
+    func pageContains(quotes: [String]) async -> [Bool] {
+        guard !quotes.isEmpty else { return [] }
+        let list = "[" + quotes.map { PageScanner.jsStringLiteral($0) }.joined(separator: ",") + "]"
+        let js = #"""
+        (function(){
+          try {
+            function norm(s) {
+              return String(s || '').toLowerCase()
+                .replace(/[‘’]/g, "'").replace(/[“”]/g, '"')
+                .replace(/\s+/g, ' ').trim();
+            }
+            var hay = norm((document.body && document.body.innerText) || '') + ' ' + norm(document.title);
+            var wanted = \#(list);
+            var out = [];
+            for (var i = 0; i < wanted.length; i++) {
+              var q = norm(wanted[i]);
+              out.push(q.length > 0 && hay.indexOf(q) !== -1);
+            }
+            return JSON.stringify(out);
+          } catch (e) { return '[]'; }
+        })()
+        """#
+        let raw = await runJS(js)
+        guard let found = try? JSONDecoder().decode([Bool].self, from: Data(raw.utf8)),
+              found.count == quotes.count
+        else { return quotes.map { _ in false } }
+        return found
     }
 
     /// Absolute links currently rendered in the main document, bounded and

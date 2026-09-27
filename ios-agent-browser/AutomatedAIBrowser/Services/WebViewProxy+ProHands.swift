@@ -71,6 +71,9 @@ extension WebViewProxy {
                     height: element.height
                 )
                 merged.panelLabel = panel.host
+                merged.context = element.context
+                merged.linkHint = element.linkHint
+                merged.inputType = element.inputType
                 elements.append(merged)
                 panelRoutes[nextID] = PanelRoute(
                     frame: panel.frame,
@@ -92,9 +95,19 @@ extension WebViewProxy {
     /// Starts the change-watcher in the frame that owns `targetID` (or the main
     /// frame). Call before executing a gesture or form move.
     func beginReactionWatch(targetID: Int?) async {
-        reactionWatchFrame = targetID.flatMap { panelRoutes[$0]?.frame }
+        let route = targetID.flatMap { panelRoutes[$0] }
+        reactionWatchFrame = route?.frame
         reactionWatchURL = currentURLString
-        _ = await runJS(ReactionWatch.startScript, in: reactionWatchFrame)
+        // Inside a panel the element answers to its local number.
+        let localTarget = route?.localID ?? targetID
+        _ = await runJS(ReactionWatch.startScript(targetID: localTarget), in: reactionWatchFrame)
+    }
+
+    /// Waits for the page to react to the move just made: at least `minimum`,
+    /// then until nothing has really changed for a moment and no request the
+    /// page sent is still out — or `maximum`, whichever comes first.
+    func settleReaction(minimum: TimeInterval, maximum: TimeInterval) async {
+        await settle(minimum: minimum, maximum: maximum, in: reactionWatchFrame)
     }
 
     /// Stops the watcher and returns the plain-language verdict.
