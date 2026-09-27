@@ -22,10 +22,12 @@ extension WebViewProxy {
     func mergingPanelElements(into observation: PageObservation) async -> PageObservation {
         let listRaw = await runJS(PageScanner.iframeListScript)
         guard let data = listRaw.data(using: .utf8),
-              let iframes = try? JSONDecoder().decode([IframeBox].self, from: data),
-              !iframes.isEmpty else {
+              let listed = try? JSONDecoder().decode([IframeBox].self, from: data)
+        else {
             return observation
         }
+        let iframes = listed.filter { !PageScanner.isAdFrame(src: $0.src) }
+        guard !iframes.isEmpty else { return observation }
 
         var elements = observation.elements
         var nextID = (elements.map(\.id).max() ?? 0) + 1

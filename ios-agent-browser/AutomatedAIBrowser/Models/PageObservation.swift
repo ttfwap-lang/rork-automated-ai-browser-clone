@@ -20,6 +20,8 @@ nonisolated struct PageObservation {
     let isPartial: Bool
     /// Visible embedded panels (iframes) that could not be scanned this look.
     var blockedPanelCount: Int = 0
+    /// Hash and length of the page's visible text, from the scan.
+    var textSignature: String = ""
 
     func element(withID id: Int) -> ScannedElement? {
         elements.first { $0.id == id }
@@ -39,9 +41,20 @@ nonisolated struct PageObservation {
             unlistedVisibleCount: unlistedVisibleCount,
             overlayLikely: overlayLikely,
             isPartial: isPartial,
-            blockedPanelCount: blockedPanelCount
+            blockedPanelCount: blockedPanelCount,
+            textSignature: textSignature
         )
     }
+
+    /// What the page is right now, compact enough to compare step to step:
+    /// address, how many controls are on screen, where the view sits, and what
+    /// the text says. Unchanged across several moves means the moves did nothing.
+    func fingerprint(urlString: String) -> String {
+        "\(urlString)|\(elements.count)|\(Int((scrollFraction * 20).rounded()))|\(textSignature)"
+    }
+
+    /// True when any element on screen is new since the agent's last look.
+    var hasNewElements: Bool { elements.contains(where: \.isNew) }
 
     private var wholePageVisible: Bool {
         documentHeightRatio <= 1.05
@@ -59,6 +72,9 @@ nonisolated struct PageObservation {
             }
             if unlistedVisibleCount > 0 {
                 lines.append("(+\(unlistedVisibleCount) more interactive elements on screen, not listed)")
+            }
+            if hasNewElements {
+                lines.append("(* marks controls that appeared since your last look — often the menu, list or dialog your last move opened.)")
             }
             if elements.contains(where: { $0.panelLabel != nil }) {
                 lines.append("Elements marked (in embedded panel: …) sit inside embedded widgets — tap_element, type_into, and the other element moves work on them normally.")

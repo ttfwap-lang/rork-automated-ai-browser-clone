@@ -80,6 +80,13 @@ final class AppSettings {
         didSet { UserDefaults.standard.set(dossierEnabled, forKey: Keys.dossier) }
     }
 
+    /// Let the agent hand the browser to you at a wall it cannot pass itself —
+    /// a sign-in, a verification challenge, a code sent to your phone. Off, it
+    /// keeps working the page's own route instead of stopping.
+    var handOverEnabled: Bool {
+        didSet { UserDefaults.standard.set(handOverEnabled, forKey: Keys.handOver) }
+    }
+
     let homepage = "https://duckduckgo.com"
 
     private enum Keys {
@@ -98,6 +105,7 @@ final class AppSettings {
         static let lessons = "settings.lessonsEnabled"
         static let selfHeal = "settings.selfHealEnabled"
         static let dossier = "settings.dossierEnabled"
+        static let handOver = "settings.handOverEnabled"
     }
 
     init() {
@@ -118,5 +126,6 @@ final class AppSettings {
         lessonsEnabled = defaults.object(forKey: Keys.lessons) as? Bool ?? true
         selfHealEnabled = defaults.object(forKey: Keys.selfHeal) as? Bool ?? true
         dossierEnabled = defaults.object(forKey: Keys.dossier) as? Bool ?? true
+        handOverEnabled = defaults.object(forKey: Keys.handOver) as? Bool ?? false
     }
 }

@@ -54,7 +54,8 @@ nonisolated enum PageScanner {
             elementsBelow: max(payload.be ?? 0, 0),
             unlistedVisibleCount: max(payload.more ?? 0, 0),
             overlayLikely: payload.ov ?? false,
-            isPartial: payload.partial ?? false
+            isPartial: payload.partial ?? false,
+            textSignature: "\(Int(payload.th ?? 0))/\(payload.tl ?? 0)"
         )
     }
 
@@ -71,6 +72,9 @@ nonisolated enum PageScanner {
         let partial: Bool?
         let els: [ElementPayload]?
         let why: String?
+        /// Hash and length of the page's visible text.
+        let th: Double?
+        let tl: Int?
     }
 
     nonisolated private struct ElementPayload: Decodable {
@@ -114,15 +118,8 @@ nonisolated enum PageScanner {
             var x = Math.max(1, Math.min(window.innerWidth - 1, r.left + r.width / 2));
             var y = Math.max(1, Math.min(window.innerHeight - 1, r.top + r.height / 2));
             __ripple(x, y);
-            var opts = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y };
-            try {
-              el.dispatchEvent(new PointerEvent('pointerdown', opts));
-              el.dispatchEvent(new MouseEvent('mousedown', opts));
-              el.dispatchEvent(new PointerEvent('pointerup', opts));
-              el.dispatchEvent(new MouseEvent('mouseup', opts));
-            } catch (e) {}
-            if (el.matches && el.matches('input,textarea,select,[contenteditable="true"],[contenteditable=""]')) { try { el.focus(); } catch (e) {} }
-            if (typeof el.click === 'function') { el.click(); } else { el.dispatchEvent(new MouseEvent('click', opts)); }
+            \#(naturalPressFunction)
+            __press(el, x, y);
             var desc = \#(jsStringLiteral(descriptor));
             if (!desc) {
               var tag = (el.tagName || '?').toLowerCase();
@@ -161,31 +158,99 @@ nonisolated enum PageScanner {
               Math.max(1, Math.min(window.innerWidth - 1, r.left + r.width / 2)),
               Math.max(1, Math.min(window.innerHeight - 1, r.top + r.height / 2))
             );
-            try { el.focus(); } catch (e) {}
-            if (el.isContentEditable) {
-              try { var sel = window.getSelection(); sel.selectAllChildren(el); } catch (e) {}
-              document.execCommand('insertText', false, t);
-            } else if (('value' in el) && el.tagName !== 'SELECT') {
-              var proto = el.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
-              var d = Object.getOwnPropertyDescriptor(proto, 'value');
-              if (d && d.set) { d.set.call(el, t); } else { el.value = t; }
-              el.dispatchEvent(new Event('input', { bubbles: true }));
-              el.dispatchEvent(new Event('change', { bubbles: true }));
-            } else {
+            \#(naturalTypingFunction)
+            if (!__typeNaturally(el, t)) {
               return 'element \#(display) (' + desc + ') is not a typeable field';
             }
-            if (doSubmit) {
-              var ke = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true };
-              el.dispatchEvent(new KeyboardEvent('keydown', ke));
-              el.dispatchEvent(new KeyboardEvent('keypress', ke));
-              el.dispatchEvent(new KeyboardEvent('keyup', ke));
-              if (el.form) { if (el.form.requestSubmit) { el.form.requestSubmit(); } else { el.form.submit(); } }
-            }
+            if (doSubmit) { __pressEnter(el); }
             return 'typed "' + t.slice(0, 40) + '" into [\#(display)] ' + desc + (doSubmit ? ' — submitted' : '') + \#(rematchNoteExpression);
           } catch (e) { return 'type error: ' + e.message; }
         })()
         """#
     }
+
+    /// A finger's tap, as the page sees one on a phone: the pointer arrives
+    /// (over/enter/move), goes down, focuses what it lands on, comes up, and
+    /// clicks. Pages that listen for any one of these — menus that open on
+    /// pointerdown, buttons that wait for pointerup — respond as they would to
+    /// a person.
+    static let naturalPressFunction = #"""
+        function __press(el, x, y) {
+          var base = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, screenX: x, screenY: y };
+          var ptr = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, screenX: x, screenY: y,
+                      pointerId: 1, pointerType: 'touch', isPrimary: true, width: 20, height: 20, pressure: 0.5 };
+          function fire(type, Ctor, init) { try { el.dispatchEvent(new Ctor(type, init)); } catch (e) {} }
+          fire('pointerover', PointerEvent, ptr);
+          fire('pointerenter', PointerEvent, Object.assign({}, ptr, { bubbles: false }));
+          fire('mouseover', MouseEvent, base);
+          fire('pointermove', PointerEvent, ptr);
+          fire('pointerdown', PointerEvent, Object.assign({}, ptr, { buttons: 1 }));
+          fire('mousedown', MouseEvent, Object.assign({}, base, { buttons: 1 }));
+          if (el.matches && el.matches('input,textarea,select,[contenteditable="true"],[contenteditable=""]')) { try { el.focus(); } catch (e) {} }
+          fire('pointerup', PointerEvent, ptr);
+          fire('mouseup', MouseEvent, base);
+          if (typeof el.click === 'function') { el.click(); } else { fire('click', MouseEvent, base); }
+        }
+        """#
+
+    /// Typing the way a keyboard does it: the field is cleared, then each
+    /// character arrives as keydown → beforeinput → value change → input →
+    /// keyup. Autocomplete boxes, input masks and "search as you type" fields
+    /// only wake up for that sequence. The value is set through the native
+    /// setter so framework-driven fields register it, and read back after each
+    /// character so a mask that reformats is respected rather than overwritten.
+    /// Enter submits the form only when the page did not handle the key itself,
+    /// which is what a real keyboard does — and what stops a double submit.
+    static let naturalTypingFunction = #"""
+        function __setValue(el, value) {
+          var proto = el.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+          var d = Object.getOwnPropertyDescriptor(proto, 'value');
+          if (d && d.set) { d.set.call(el, value); } else { el.value = value; }
+        }
+        function __key(el, type, ch) {
+          var code = ch.length === 1 ? ch.charCodeAt(0) : 0;
+          try { return el.dispatchEvent(new KeyboardEvent(type, { key: ch, bubbles: true, cancelable: true, keyCode: code, which: code, charCode: type === 'keypress' ? code : 0 })); }
+          catch (e) { return true; }
+        }
+        function __typeNaturally(el, t) {
+          try { el.focus(); } catch (e) {}
+          if (el.isContentEditable) {
+            try { var sel = window.getSelection(); sel.selectAllChildren(el); } catch (e) {}
+            try { document.execCommand('delete', false); } catch (e) {}
+            for (var c = 0; c < t.length; c++) {
+              var ch0 = t.charAt(c);
+              __key(el, 'keydown', ch0);
+              try { document.execCommand('insertText', false, ch0); } catch (e) {}
+              __key(el, 'keyup', ch0);
+            }
+            return true;
+          }
+          if (!('value' in el) || el.tagName === 'SELECT') { return false; }
+          __setValue(el, '');
+          try { el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteContentBackward' })); } catch (e) { el.dispatchEvent(new Event('input', { bubbles: true })); }
+          for (var i = 0; i < t.length; i++) {
+            var ch = t.charAt(i);
+            __key(el, 'keydown', ch);
+            __key(el, 'keypress', ch);
+            try { el.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, inputType: 'insertText', data: ch })); } catch (e) {}
+            __setValue(el, String(el.value == null ? '' : el.value) + ch);
+            try { el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: ch })); } catch (e) { el.dispatchEvent(new Event('input', { bubbles: true })); }
+            __key(el, 'keyup', ch);
+          }
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+          return true;
+        }
+        function __pressEnter(el) {
+          var ke = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true };
+          var unhandled = true;
+          try { unhandled = el.dispatchEvent(new KeyboardEvent('keydown', ke)); } catch (e) {}
+          try { el.dispatchEvent(new KeyboardEvent('keypress', ke)); } catch (e) {}
+          try { el.dispatchEvent(new KeyboardEvent('keyup', ke)); } catch (e) {}
+          if (unhandled && el.form) {
+            if (el.form.requestSubmit) { el.form.requestSubmit(); } else { el.form.submit(); }
+          }
+        }
+        """#
 
     /// Reads back what a field actually holds after typing — the honest evidence
     /// that typing landed, since setting a value mutates no DOM node. Returns the
@@ -298,6 +363,92 @@ nonisolated enum PageScanner {
     }
 
     // MARK: - Embedded panels
+
+    /// Hosts that serve ads and trackers. Their frames are never scanned or
+    /// counted: an ad is not part of the task, and every panel scanned costs
+    /// time and a place in the element list.
+    static let adHosts = [
+        "doubleclick.net", "googlesyndication.com", "googleadservices.com", "adservice.google.",
+        "amazon-adsystem.com", "adnxs.com", "taboola.com", "outbrain.com", "criteo.com",
+        "criteo.net", "pubmatic.com", "rubiconproject.com", "openx.net", "moatads.com",
+        "adsrvr.org", "yieldmo.com", "media.net", "sharethrough.com", "teads.tv",
+    ]
+
+    /// True when an embedded panel's address belongs to an ad or tracker.
+    static func isAdFrame(src: String) -> Bool {
+        guard let host = URL(string: src)?.host?.lowercased() else { return false }
+        return adHosts.contains { host == $0 || host.hasSuffix("." + $0) || ($0.hasSuffix(".") && host.contains($0)) }
+    }
+
+    /// Lists a dropdown's choices without choosing one: a real select's
+    /// options, or the options a custom combobox/listbox points at.
+    static func listOptionsScript(id: Int, display: Int, expectedName: String) -> String {
+        #"""
+        (function(){
+          \#(findFunction)
+          try {
+            var el = __find(\#(id), \#(jsStringLiteral(expectedName)), false);
+            if (!el) { return \#(missExpression(display: display)); }
+            function clean(s) { return String(s || '').replace(/\s+/g, ' ').trim().slice(0, 80); }
+            var out = [];
+            if (el.tagName === 'SELECT') {
+              for (var i = 0; i < el.options.length && out.length < 80; i++) {
+                var o = el.options[i];
+                out.push((o.selected ? '(selected) ' : '') + (o.disabled ? '(disabled) ' : '') + clean(o.text));
+              }
+            } else {
+              var list = null;
+              var ref = el.getAttribute && (el.getAttribute('aria-controls') || el.getAttribute('aria-owns'));
+              if (ref) { list = document.getElementById(ref.split(/\s+/)[0]); }
+              if (!list && el.getAttribute && el.getAttribute('role') === 'listbox') { list = el; }
+              if (!list) { return 'element \#(display) is not a dropdown with listed options — use select_option to open it, then its options are numbered on the next look'; }
+              var opts = list.querySelectorAll('[role="option"]');
+              for (var j = 0; j < opts.length && out.length < 80; j++) {
+                var sel = opts[j].getAttribute('aria-selected') === 'true';
+                out.push((sel ? '(selected) ' : '') + clean(opts[j].innerText || opts[j].textContent));
+              }
+            }
+            if (!out.length) { return 'element \#(display) lists no options right now'; }
+            return 'OPTIONS OF [\#(display)] (' + out.length + '):\n' + out.map(function(t){ return '• ' + t; }).join('\n');
+          } catch (e) { return 'list error: ' + e.message; }
+        })()
+        """#
+    }
+
+    /// Finds text anywhere on the page (not just on screen), scrolls the first
+    /// match into the middle of the view, and says how many there were.
+    static func findTextScript(_ text: String) -> String {
+        #"""
+        (function(){
+          try {
+            var want = \#(jsStringLiteral(text)).replace(/\s+/g, ' ').trim().toLowerCase();
+            if (!want) { return 'find_text needs some text to look for'; }
+            var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
+            var count = 0, first = null, snippet = '';
+            while (walker.nextNode() && count < 200) {
+              var node = walker.currentNode;
+              var parent = node.parentElement;
+              if (!parent) { continue; }
+              var tag = parent.tagName;
+              if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'NOSCRIPT') { continue; }
+              var value = String(node.nodeValue || '').replace(/\s+/g, ' ');
+              var at = value.toLowerCase().indexOf(want);
+              if (at === -1) { continue; }
+              var r = parent.getBoundingClientRect();
+              if (r.width < 1 || r.height < 1) { continue; }
+              count++;
+              if (!first) {
+                first = parent;
+                snippet = value.slice(Math.max(0, at - 40), at + want.length + 60).trim();
+              }
+            }
+            if (!first) { return 'no text matching "' + want.slice(0, 40) + '" is on this page'; }
+            try { first.scrollIntoView({ block: 'center', behavior: 'instant' }); } catch (e) { first.scrollIntoView(); }
+            return 'found ' + count + ' match' + (count === 1 ? '' : 'es') + '; scrolled to the first: "' + snippet + '"';
+          } catch (e) { return 'find error: ' + e.message; }
+        })()
+        """#
+    }
 
     /// Lists visible embedded panels (iframes) in the main document with their
     /// viewport rects, so panel scans can be positioned and routed.
@@ -669,9 +820,20 @@ nonisolated enum PageScanner {
               }
             } catch (e) {}
 
+            // Fingerprint of the page's visible text, so the app can tell a
+            // page that changed from one that stayed exactly as it was.
+            var th = 0, tl = 0;
+            try {
+              var tx = String((document.body && document.body.innerText) || '').slice(0, 100000);
+              tl = tx.length;
+              var h = 2166136261;
+              for (var hi = 0; hi < tx.length; hi++) { h ^= tx.charCodeAt(hi); h = Math.imul(h, 16777619) >>> 0; }
+              th = h;
+            } catch (e) {}
+
             return JSON.stringify({
               ok: true, vw: vw, vh: vh, sf: sf, dh: dh, ab: above, be: below,
-              more: moreVisible, ov: overlay, partial: timedOut, els: els
+              more: moreVisible, ov: overlay, partial: timedOut, els: els, th: th, tl: tl
             });
           } catch (err) {
             return JSON.stringify({ ok: false, why: String((err && err.message) || err) });

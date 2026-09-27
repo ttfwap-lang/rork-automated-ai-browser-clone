@@ -276,10 +276,11 @@ struct SettingsView: View {
         return Section {
             Toggle("Weigh alternatives on hard steps", isOn: $settings.weighAlternatives)
             Toggle("Checkpoints and rewind", isOn: $settings.bookmarksEnabled)
+            Toggle("Hand the browser to me at walls", isOn: $settings.handOverEnabled)
         } header: {
             Text("Judgment")
         } footer: {
-            Text("On hard steps the agent drafts 2-4 possible moves in one reply and the app scores them against the live page before playing the best — no extra calls. Checkpoints save the page before branching moves so the agent can go back out of a dead end, up to three times per mission. A checkpoint restores the page, not text already typed into a form.")
+            Text("On hard steps the agent drafts 2-4 possible moves in one reply and the app scores them against the live page before playing the best — no extra calls. Checkpoints save the page before branching moves so the agent can go back out of a dead end, up to three times per mission. A checkpoint restores the page, not text already typed into a form. With hand-over on, a sign-in, verification or code the agent cannot get past pauses the run so you can do that part yourself; off, the agent keeps working the page's own route until its step budget runs out.")
         }
     }
 

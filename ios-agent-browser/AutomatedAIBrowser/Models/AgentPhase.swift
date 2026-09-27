@@ -9,6 +9,8 @@ nonisolated enum AgentPhase: Equatable, Sendable {
     case awaitingApproval
     /// Paused on a question the agent asked the person.
     case awaitingAnswer
+    /// Paused while you do a part of the task yourself.
+    case yourTurn
     case acting
     case verifying
     /// Distilling a confirmed success into a route worth keeping.
@@ -28,6 +30,7 @@ nonisolated enum AgentPhase: Equatable, Sendable {
         case .thinking: "THINKING"
         case .awaitingApproval: "AWAITING APPROVAL"
         case .awaitingAnswer: "WAITING FOR YOUR ANSWER"
+        case .yourTurn: "YOUR TURN"
         case .acting: "ACTING"
         case .verifying: "VERIFYING"
         case .remembering: "REMEMBERING"
@@ -56,7 +59,7 @@ nonisolated enum AgentPhase: Equatable, Sendable {
     var isBusyThinking: Bool {
         switch self {
         case .planning, .observing, .thinking, .verifying, .remembering, .replaying, .matching, .retrying: true
-        case .idle, .awaitingApproval, .awaitingAnswer, .acting: false
+        case .idle, .awaitingApproval, .awaitingAnswer, .yourTurn, .acting: false
         }
     }
 }
@@ -69,6 +72,7 @@ extension AgentPhase {
         case .observing, .thinking: Theme.cyan
         case .awaitingApproval: Theme.amber
         case .awaitingAnswer: Theme.amber
+        case .yourTurn: Theme.amber
         case .acting: Theme.green
         case .verifying: Theme.violet
         case .remembering: Theme.cyan

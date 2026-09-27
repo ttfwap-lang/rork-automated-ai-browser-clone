@@ -32,6 +32,8 @@ nonisolated struct ScannedElement: Identifiable, Codable, Equatable {
     var linkHint: String? = nil
     /// Input type of a non-text field, e.g. `email`, `tel`, `date`.
     var inputType: String? = nil
+    /// True when this control was not on the page at the agent's last look.
+    var isNew: Bool = false
 
     /// Compact descriptor for feedback lines and step cards, e.g. `button "Add to cart"`.
     var shortDescriptor: String {
@@ -41,7 +43,7 @@ nonisolated struct ScannedElement: Identifiable, Codable, Equatable {
     /// One line of the page map, e.g. `[7] field "Email" (empty, required)`, or
     /// `[12] button "Add to cart" (in: "Sony WH-1000XM5")` for a look-alike.
     var mapLine: String {
-        var line = "[\(id)] \(kind.rawValue)"
+        var line = "\(isNew ? "*" : "")[\(id)] \(kind.rawValue)"
         line += name.isEmpty ? " (unlabeled)" : " \"\(name)\""
 
         var stateParts = states.filter { $0 != "filled" }

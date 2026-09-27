@@ -10,10 +10,19 @@ nonisolated enum PageReader {
     /// Character budget for one reading.
     static let budget = 9_000
 
-    static let readScript = #"""
+    /// The reading capped at `budget` — what the independent check and older
+    /// callers use.
+    static let readScript = readingScript(limit: budget)
+
+    /// Most characters one whole-page reading collects before `PageDigest`
+    /// picks what the model gets.
+    static let fullLimit = 60_000
+
+    static func readingScript(limit: Int) -> String {
+        #"""
         (function(){
           try {
-            var LIMIT = 9000;
+            var LIMIT = \#(limit);
             var title = document.title || '';
             var main = document.querySelector('article') ||
                        document.querySelector('main') ||
@@ -110,4 +119,5 @@ nonisolated enum PageReader {
           } catch (err) { return 'extract error: ' + String((err && err.message) || err); }
         })()
         """#
+    }
 }

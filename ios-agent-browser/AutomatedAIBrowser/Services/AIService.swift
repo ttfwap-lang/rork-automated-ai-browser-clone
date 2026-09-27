@@ -65,6 +65,11 @@ nonisolated struct AIService {
         var goalDetailsNote: String? = nil
         /// True while the agent may still put a question to the person.
         var canAskUser: Bool = false
+        /// True when hand-over is switched on and turns remain.
+        var canHandOver: Bool = false
+        /// True when this simple step is sent without a screenshot: the element
+        /// list describes the page completely.
+        var textOnly: Bool = false
         /// The agent's own recent moves and their results, replayed as a real
         /// tool-call conversation. Empty sends the single-message briefing only.
         var transcript: [TranscriptTurn] = []
@@ -286,6 +291,11 @@ nonisolated struct AIService {
         props["reasoning"] = .string("One or two short sentences explaining why this is the right next move.")
         props["task"] = .integer("When a MISSION PLAN is present: the plan task number this move serves.", min: 1, max: 99)
         props["completed_tasks"] = .integerArray("When a MISSION PLAN is present: task numbers you can SEE are finished on this screen. Evidence only \u{2014} never intent.")
+        props["previous_move"] = .stringEnum(
+            "Judged from THIS screen: did your previous move do what you meant? first_move on the first step.",
+            values: ["worked", "failed", "unclear", "first_move"]
+        )
+        props["next_goal"] = .string("The immediate objective this move serves, in a few words.")
         props["note_facts"] = .objectArray(
             "Facts on THIS page the goal will need later (prices, dates, names, answers). Page readings are forgotten next turn; notes are kept. Each quote must be copied exactly from the page.",
             itemProperties: [
@@ -447,7 +457,56 @@ nonisolated struct AIService {
             required: ["url"]
         ),
         tool("back", "Go back to the previous page in browser history."),
-        tool("extract", "Read a CLEANED copy of the ENTIRE page (menus stripped, headings marked with #, lists as bullets) — provided to you on the next turn. Prefer this over scroll-hunting for informational goals."),
+        tool(
+            "extract",
+            "Read a CLEANED copy of the page (menus stripped, headings marked with #, lists as bullets), provided on your next turn. Give a query and you get the sections that answer it, from anywhere on the page. Without one you get the page from the top — or from start_from to keep reading a long page. Prefer this over scroll-hunting for informational goals.",
+            properties: [
+                "query": .string("What you are looking for, e.g. 'return policy for opened items'. The most relevant sections come back."),
+                "start_from": .integer("Continue a long reading from this character, as the last reading told you.", min: 0, max: 1_000_000),
+            ]
+        ),
+        tool(
+            "list_options",
+            "See every choice in a dropdown without choosing one — for real selects and for custom dropdowns that list their options. The list comes back on your next turn.",
+            properties: [
+                "element": .integer("The dropdown's element number.", min: 1, max: 999),
+            ],
+            required: ["element"]
+        ),
+        tool(
+            "find_text",
+            "Find text anywhere on the page, including far below the screen, and scroll the first match into view. Faster than scrolling to hunt for a known word or label.",
+            properties: [
+                "text": .string("The words to find."),
+            ],
+            required: ["text"]
+        ),
+        tool(
+            "do_sequence",
+            "Make 2-5 simple moves in ONE turn when you can already see every target — e.g. tick two filters then tap Apply. Only the LAST move may load a new page or open something (navigate, back, a link, a submit, a menu). If any move fails or the page changes early, the rest are skipped and you are told.",
+            properties: [
+                "moves": .objectArray(
+                    "The moves, in order.",
+                    itemProperties: [
+                        "move": .stringEnum(
+                            "Which move.",
+                            values: ["tap_element", "type_into", "select_option", "set_toggle", "set_slider", "hover", "scroll", "navigate", "back"]
+                        ),
+                        "element": .integer("Target element number, for element moves.", min: 1, max: 999),
+                        "text": .string("Text to type, for type_into."),
+                        "submit": .boolean("Press Enter afterwards, for type_into."),
+                        "option": .string("Option text, for select_option."),
+                        "on": .boolean("Desired state, for set_toggle."),
+                        "value": .integer("Target percent 0-100, for set_slider.", min: 0, max: 100),
+                        "direction": .stringEnum("Direction, for scroll.", values: ["up", "down"]),
+                        "amount": .integer("Scroll distance in pixels.", min: 200, max: 1200),
+                        "url": .string("Full URL, for navigate."),
+                    ],
+                    required: ["move"]
+                ),
+            ],
+            required: ["moves"]
+        ),
         tool("page_overview", "See the WHOLE page at once: captures up to 6 screens and attaches one tall stitched picture to your NEXT decision. Orientation only — it has NO badges; keep acting via the numbered elements. Use sparingly: when lost, or when the goal spans the full page."),
         tool("wait", "Wait 2 seconds for the page to finish loading. Use when the screenshot looks blank or mid-load."),
         tool(
@@ -467,6 +526,17 @@ nonisolated struct AIService {
             required: ["reason"]
         ),
     ]
+
+    /// Hand the browser to the person — offered only when hand-over is on.
+    nonisolated private static let handOverTool = tool(
+        "hand_over",
+        "Pause and let the person do a part only they can do in this browser — sign in, pass a verification check, enter a code sent to their phone — then carry on from where they leave the page. Use it at such a wall instead of giving up. Consumes your turn; capped at 3 per mission.",
+        properties: [
+            "instruction": .string("What the person should do, in one short sentence, e.g. 'Sign in to your account, then tap Done'."),
+            "reason": .string("What stopped you."),
+        ],
+        required: ["instruction"]
+    )
 
     /// Ask the watching person — offered only while questions remain.
     nonisolated private static let askUserTool = tool(
@@ -542,10 +612,12 @@ nonisolated struct AIService {
         hasBookmarks: Bool = false,
         allowShortlist: Bool = false,
         hasDossier: Bool = false,
-        canAskUser: Bool = false
+        canAskUser: Bool = false,
+        canHandOver: Bool = false
     ) -> [ToolDefinition] {
         var set = hasDossier ? agentTools : agentTools.filter { $0.function.name != "fill_from_dossier" }
         if canAskUser { set.append(askUserTool) }
+        if canHandOver { set.append(handOverTool) }
         if hasPlan { set.append(revisePlanTool) }
         if hasBookmarks { set.append(rewindTool) }
         if allowShortlist { set.append(weighOptionsTool) }
@@ -600,7 +672,26 @@ nonisolated struct AIService {
             let quote: String?
         }
 
+        struct Move: Decodable {
+            let move: String?
+            let element: Int?
+            let text: String?
+            let submit: Bool?
+            let option: String?
+            let on: Bool?
+            let value: Double?
+            let direction: String?
+            let amount: Double?
+            let url: String?
+        }
+
         let reasoning: String?
+        let previousMove: String?
+        let nextGoal: String?
+        let query: String?
+        let startFrom: Int?
+        let instruction: String?
+        let moves: [Move]?
         let noteFacts: [Fact]?
         let question: String?
         let choices: [String]?
@@ -631,8 +722,11 @@ nonisolated struct AIService {
 
         enum CodingKeys: String, CodingKey {
             case reasoning, element, x, y, text, submit, direction, amount, url, summary, reason, option, on, value, fields, from, to, task, tasks, bookmark
-            case question, choices
+            case question, choices, query, instruction, moves
             case noteFacts = "note_facts"
+            case previousMove = "previous_move"
+            case nextGoal = "next_goal"
+            case startFrom = "start_from"
             case fromX = "from_x"
             case fromY = "from_y"
             case toX = "to_x"
@@ -700,7 +794,8 @@ nonisolated struct AIService {
                 hasBookmarks: request.hasBookmarks,
                 allowShortlist: request.allowShortlist,
                 hasDossier: request.hasDossier,
-                canAskUser: request.canAskUser
+                canAskUser: request.canAskUser,
+                canHandOver: request.canHandOver
             ),
             onRetry: onRetry
         )
@@ -743,7 +838,7 @@ nonisolated struct AIService {
     nonisolated static let transcriptToolNames: Set<String> = [
         "tap_element", "type_into", "fill_form", "select_option", "set_toggle", "set_slider",
         "drag", "long_press", "hover", "swipe", "tap", "type_text", "scroll", "navigate",
-        "back", "extract", "page_overview", "wait", "done", "fail",
+        "back", "extract", "page_overview", "wait", "done", "fail", "list_options", "find_text",
     ]
 
     /// The arguments a move was made with, re-encoded as the tool call's JSON.
@@ -771,6 +866,10 @@ nonisolated struct AIService {
         if let toX = action.toX { args["to_x"] = Int(toX) }
         if let toY = action.toY { args["to_y"] = Int(toY) }
         if let summary = action.summary { args["summary"] = summary }
+        if let query = action.query { args["query"] = query }
+        if let startFrom = action.startFrom { args["start_from"] = startFrom }
+        if let previous = action.previousMove { args["previous_move"] = previous }
+        if let goal = action.nextGoal { args["next_goal"] = goal }
         if let reason = action.reason { args["reason"] = reason }
         if let task = action.task { args["task"] = task }
         if let completed = action.completedTasks, !completed.isEmpty { args["completed_tasks"] = completed }
@@ -1151,7 +1250,56 @@ nonisolated struct AIService {
         action.question = args.question.map { String($0.trimmed.prefix(300)) }
         let choices = (args.choices ?? []).map { String($0.trimmed.prefix(60)) }.filter { !$0.isEmpty }.prefix(5)
         action.choices = choices.isEmpty ? nil : Array(choices)
+        action.previousMove = args.previousMove?.trimmed.lowercased()
+        action.nextGoal = args.nextGoal.map { String($0.trimmed.prefix(120)) }
+        action.query = args.query.map { String($0.trimmed.prefix(200)) }
+        action.startFrom = args.startFrom.map { max(0, $0) }
+        action.instruction = args.instruction.map { String($0.trimmed.prefix(200)) }
+
+        if kind == .sequence {
+            let moves = sequenceMoves(from: args.moves ?? [])
+            guard !moves.isEmpty else { return nil }
+            // A sequence of one is just that move.
+            if moves.count == 1 {
+                var single = moves[0]
+                single.task = action.task
+                single.completedTasks = action.completedTasks
+                single.notedFacts = action.notedFacts
+                single.previousMove = action.previousMove
+                single.nextGoal = action.nextGoal
+                return AgentDecision(reasoning: args.reasoning, action: single)
+            }
+            action.moves = moves
+        }
         return AgentDecision(reasoning: args.reasoning, action: action)
+    }
+
+    /// Most moves one do_sequence may carry.
+    nonisolated static let maxSequenceMoves = 5
+
+    /// The moves of a do_sequence, limited to the simple kinds it allows.
+    nonisolated private static func sequenceMoves(from drafts: [ToolArguments.Move]) -> [AgentAction] {
+        let allowed: Set<AgentActionKind> = [
+            .tapElement, .typeInto, .selectOption, .setToggle, .setSlider, .hover, .scroll, .navigate, .back,
+        ]
+        let moves: [AgentAction] = drafts.compactMap { draft in
+            guard let raw = draft.move?.trimmed.lowercased(),
+                  let kind = AgentActionKind(rawValue: raw),
+                  allowed.contains(kind)
+            else { return nil }
+            var move = AgentAction(type: kind.rawValue)
+            move.element = draft.element
+            move.text = draft.text
+            move.submit = draft.submit
+            move.option = draft.option
+            move.on = draft.on
+            move.value = draft.value
+            move.direction = draft.direction
+            move.amount = draft.amount
+            move.url = draft.url
+            return move
+        }
+        return Array(moves.prefix(maxSequenceMoves))
     }
 
     /// Legacy fallback: extracts a `{"reasoning":…,"action":…}` JSON object from
@@ -1243,6 +1391,9 @@ nonisolated struct AIService {
             lines.append("PAGE TITLE: \(request.pageTitle)")
         }
         lines.append("STEP \(request.stepIndex) of \(request.maxSteps)")
+        if request.maxSteps > 0, request.stepIndex * 4 >= request.maxSteps * 3 {
+            lines.append("BUDGET: three quarters of your steps are used. Put what remains into the most important part of the goal; if all of it cannot fit, finish that part and say plainly what is left.")
+        }
         lines.append("")
         lines.append("PREVIOUS STEPS:")
         if request.historyLines.isEmpty {
@@ -1268,7 +1419,12 @@ nonisolated struct AIService {
             lines.append(extracted)
         }
         lines.append("")
-        if request.imageBase64.isEmpty {
+        if request.textOnly, let map = request.pageMap, !map.isEmpty {
+            lines.append("NO SCREENSHOT THIS STEP — this is a simple page and the list below describes every control on it. If you need to see it, call page_overview.")
+            lines.append(Self.pageDataNotice)
+            lines.append(map)
+            lines.append("Decide the single next action and call the matching tool — prefer element-targeted moves with those numbers.")
+        } else if request.imageBase64.isEmpty {
             lines.append("SCREENSHOT UNAVAILABLE THIS STEP — page capture returned nil (layout zero bounds or web process reload). Work from the page text / URL / history.")
             if let map = request.pageMap, !map.isEmpty {
                 lines.append(Self.pageDataNotice)
@@ -1309,8 +1465,12 @@ nonisolated struct AIService {
     - drag / long_press / hover / swipe: synthetic gestures. Every gesture result ends with a reaction verdict — "page reacted (…)" or "no visible reaction". If nothing reacted, do NOT repeat the same gesture; try another route (arrows, buttons, direct URL) or report honestly. long_press only triggers what the site itself defines. hover wakes desktop hover menus; anything new gets numbered next turn.
     - Coordinate "tap" is the LAST RESORT for badge-free surfaces (maps, canvases, unscannable panels).
 
+    - do_sequence: 2-5 simple moves in one turn when every target is already on screen (tick filters, then Apply). Only the last move may load a page or open something.
+
     YOUR SIGHT:
-    - extract: a cleaned reading of the ENTIRE page (menus stripped, headings marked #, lists as •). Prefer it over scroll-hunting for informational goals.
+    - extract: a cleaned reading of the page (menus stripped, headings marked #, lists as •). Give a query to get the sections that answer it from anywhere on the page; use start_from to read on through a long page. Prefer it over scroll-hunting for informational goals.
+    - find_text jumps to a known word or label anywhere on the page; list_options shows a dropdown's choices before you pick one.
+    - A * before an element number means it appeared since your last look — usually what your last move opened.
     - page_overview: one tall stitched picture of up to 6 screens, attached to your NEXT turn. Orientation only — NO badges on it; never pick targets from it. Use sparingly: when lost, or when the goal spans the whole page.
 
     THE MISSION PLAN (present when a MISSION PLAN block appears in your context):
@@ -1342,9 +1502,14 @@ nonisolated struct AIService {
     - When you call done, a SEPARATE reviewer looks at a fresh screenshot and the page text and decides whether the SUCCESS MEANS statement is visibly true. It never sees your reasoning, so confident wording cannot help you. It also sees YOUR NOTES, so facts gathered on earlier pages count.
     - If it rejects your claim you are sent back to work with its objection. So only call done when the evidence is actually on the page or in your notes, and put the real answer — read from the page, never invented — in the summary.
 
+    MOVING LIKE A PERSON:
+    - Use navigate to reach a starting point — a site's home page, or a search such as https://duckduckgo.com/?q=your+query. From there, move through the site the way a person would: its links, menus, search box and filters. Do not compose deep URLs or edit query strings to skip the site's own steps.
+    - One deliberate move at a time, on controls you can see. If a move does not work, try the next most natural way a person would — a different control, scrolling to it, opening its menu — rather than giving up.
+    - A wall (sign-in, verification, a code) is not the end of the task. When hand_over is offered, use it there so the person can do that part. When it is not, keep working the page's own route — a continue, skip or guest option, another entry point, trying again — and only fail once every route is truly exhausted.
+
     RULES:
-    1. Call exactly one tool per turn, always with a short "reasoning" (one or two sentences).
-    2. Prefer "navigate" with a direct URL when you know the destination — e.g. https://duckduckgo.com/?q=your+query for searches.
+    1. Call exactly one tool per turn, always with a short "reasoning" (one or two sentences), "previous_move" (how your last move went, judged from this screen) and "next_goal".
+    2. Navigate directly only to reach a starting point (see MOVING LIKE A PERSON).
     3. Respect element states: never press one marked (disabled); don't set_toggle to a state it's already in; fill (empty, required) fields before submitting a form.
     4. The VIEW line says where you are on the page and how many elements sit above/below the visible area — scroll only when what you need is off-screen.
     5. If a cookie/consent banner or overlay blocks the page (see the NOTE line), dismiss it first via its numbered button.
@@ -1352,7 +1517,7 @@ nonisolated struct AIService {
     7. Results are honest — read them and adapt. A "no visible reaction" verdict means that route failed; never repeat it more than once.
     8. If your recent actions repeat without progress, change strategy — another element, another route, another page.
     9. When the goal asks for information, use "extract" to read the page before "done", and put the answer in the "done" summary.
-    10. Use "fail" only when the goal is truly impossible (bot walls, CAPTCHAs, login required).
+    10. Use "fail" only when the goal is truly impossible and every natural route has been tried.
     11. Never invent facts — read them from the page.
     12. Only use "fail" when the goal is truly out of reach. If checkpoints remain with routes you have not tried, going back and trying one is the right move, not giving up.
     """

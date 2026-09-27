@@ -22,6 +22,12 @@ nonisolated enum AgentActionKind: String, Codable, CaseIterable {
     case back
     case extract
     case pageOverview = "page_overview"
+    /// List a dropdown's options without choosing one.
+    case listOptions = "list_options"
+    /// Find text on the page and bring the first match into view.
+    case findText = "find_text"
+    /// Several simple moves in one turn, the page-changing one last.
+    case sequence = "do_sequence"
     case wait
     case revisePlan = "revise_plan"
     case rewind
@@ -29,6 +35,9 @@ nonisolated enum AgentActionKind: String, Codable, CaseIterable {
     case fail
     /// Pause and ask the watching person one question the page cannot answer.
     case askUser = "ask_user"
+    /// Pause and let the person do a part only they can (sign in, a challenge,
+    /// a code), then carry on. Offered only when hand-over is switched on.
+    case handOver = "hand_over"
     /// The app's own independent-check entry — never callable by the model.
     case verify = "independent_check"
     /// The app's own head-start entry, summarising moves replayed from memory.
@@ -62,12 +71,16 @@ nonisolated enum AgentActionKind: String, Codable, CaseIterable {
         case .back: "BACK"
         case .extract: "READ"
         case .pageOverview: "PAGE VIEW"
+        case .listOptions: "OPTIONS"
+        case .findText: "FIND"
+        case .sequence: "SEQUENCE"
         case .wait: "WAIT"
         case .revisePlan: "PLAN REVISED"
         case .rewind: "REWIND"
         case .done: "DONE"
         case .fail: "FAIL"
         case .askUser: "QUESTION"
+        case .handOver: "YOUR TURN"
         case .verify: "CHECK"
         case .headStart: "HEAD START"
         case .replay: "ONE-TAP REPLAY"
@@ -96,12 +109,16 @@ nonisolated enum AgentActionKind: String, Codable, CaseIterable {
         case .back: "arrow.uturn.left"
         case .extract: "doc.text.magnifyingglass"
         case .pageOverview: "rectangle.expand.vertical"
+        case .listOptions: "list.bullet"
+        case .findText: "text.magnifyingglass"
+        case .sequence: "list.number"
         case .wait: "clock.fill"
         case .revisePlan: "list.bullet.rectangle.portrait.fill"
         case .rewind: "arrow.uturn.backward.circle.fill"
         case .done: "checkmark.seal.fill"
         case .fail: "xmark.octagon.fill"
         case .askUser: "questionmark.bubble.fill"
+        case .handOver: "hand.point.up.left.fill"
         case .verify: "checkmark.shield.fill"
         case .headStart: "bolt.horizontal.fill"
         case .replay: "bolt.badge.clock.fill"
@@ -122,7 +139,7 @@ nonisolated enum AgentActionKind: String, Codable, CaseIterable {
     /// Moves that change the plan or end the run rather than touching the page.
     var isPageAction: Bool {
         switch self {
-        case .revisePlan, .rewind, .done, .fail, .askUser, .verify, .headStart, .replay, .mistake, .unknown: false
+        case .revisePlan, .rewind, .done, .fail, .askUser, .handOver, .verify, .headStart, .replay, .mistake, .unknown: false
         default: true
         }
     }

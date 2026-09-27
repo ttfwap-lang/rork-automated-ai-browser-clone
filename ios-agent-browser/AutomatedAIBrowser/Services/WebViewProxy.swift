@@ -348,6 +348,26 @@ final class WebViewProxy: NSObject, WKNavigationDelegate, WKUIDelegate {
         await runJS(PageReader.readScript)
     }
 
+    /// The same cleaned reading with a much higher cap, for `PageDigest` to
+    /// pick from — the model never receives all of it.
+    func readWholePage() async -> String {
+        await runJS(PageReader.readingScript(limit: PageReader.fullLimit))
+    }
+
+    /// A dropdown's choices, without choosing one.
+    func listOptions(id: Int, expectedName: String) async -> String {
+        let route = panelRoutes[id]
+        return await runJS(
+            PageScanner.listOptionsScript(id: route?.localID ?? id, display: id, expectedName: expectedName),
+            in: route?.frame
+        )
+    }
+
+    /// Finds text on the page and scrolls the first match into view.
+    func findText(_ text: String) async -> String {
+        await runJS(PageScanner.findTextScript(text))
+    }
+
     /// For each quote, whether it appears word for word in the page's text
     /// (case, spacing and curly-vs-straight quotes ignored). This is what makes a
     /// recorded fact evidence rather than a claim.

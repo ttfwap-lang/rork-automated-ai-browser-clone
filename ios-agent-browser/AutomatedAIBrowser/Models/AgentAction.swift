@@ -25,6 +25,20 @@ nonisolated struct AgentAction: Codable, Equatable {
     var question: String?
     /// Suggested answers the person can pick from (ask_user).
     var choices: [String]?
+    /// The model's own read of its previous move: worked, failed, unclear, or
+    /// first_move. Makes it judge the last result before choosing the next.
+    var previousMove: String?
+    /// The immediate objective this move serves, in the model's words.
+    var nextGoal: String?
+    /// What to look for when reading the page (extract), so the most relevant
+    /// sections come back rather than the first few thousand characters.
+    var query: String?
+    /// Where to continue a long reading from (extract), in characters.
+    var startFrom: Int?
+    /// What the person is asked to do themselves (hand_over).
+    var instruction: String?
+    /// The moves of a do_sequence, in order; only the last may change the page.
+    var moves: [AgentAction]?
     var x: Double?
     var y: Double?
     var text: String?
@@ -101,7 +115,18 @@ nonisolated struct AgentAction: Codable, Equatable {
         case .navigate:
             return url ?? ""
         case .extract:
+            if let query, !query.isEmpty { return "for \"\(String(query.prefix(40)))\"" }
+            if let startFrom, startFrom > 0 { return "from character \(startFrom)" }
             return "whole page"
+        case .listOptions:
+            return targetDescriptor
+        case .findText:
+            return "\"\(String((text ?? "").prefix(40)))\""
+        case .sequence:
+            let parts = (moves ?? []).map { "\($0.kind.label) \($0.detailText)" }
+            return parts.joined(separator: " → ")
+        case .handOver:
+            return instruction ?? reason ?? ""
         case .pageOverview:
             return "up to 6 screens"
         case .wait:
@@ -175,7 +200,17 @@ nonisolated struct AgentAction: Codable, Equatable {
         case .back:
             return "go back"
         case .extract:
+            if let query, !query.isEmpty { return "read the page for “\(String(query.prefix(30)))”" }
             return "read the whole page"
+        case .listOptions:
+            return named.map { "look at the choices in the \($0)" } ?? "look at a dropdown's choices"
+        case .findText:
+            return "find “\(String((text ?? "").prefix(28)))” on the page"
+        case .sequence:
+            let count = moves?.count ?? 0
+            return "make \(count) move\(count == 1 ? "" : "s") in a row"
+        case .handOver:
+            return "hand the browser to you: \(String((instruction ?? "a step only you can do").prefix(60)))"
         case .pageOverview:
             return "look at the whole page at once"
         case .wait:
@@ -222,6 +257,9 @@ nonisolated struct AgentAction: Codable, Equatable {
             "\(to ?? -1)",
             "\(fields?.count ?? 0)",
             "\(bookmark ?? -1)",
+            query ?? "",
+            "\(startFrom ?? 0)",
+            (moves ?? []).map(\.repetitionSignature).joined(separator: ";"),
         ]
         return parts.joined(separator: "|")
     }
